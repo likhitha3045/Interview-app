@@ -4,7 +4,7 @@ const userSchema = new Schema({
   name: { type: String, required: true, trim: true, maxlength: 80 },
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
   passwordHash: { type: String, required: true, select: false },
-  role: { type: String, enum: ['interviewer', 'candidate', 'recruiter'], required: true },
+  role: { type: String, enum: ['interviewer', 'candidate', 'recruiter', 'company'], required: true },
   avatarColor: { type: String, default: '#7c6cf2' },
   emailVerified: { type: Boolean, default: false },
   emailPreferences: { type: Boolean, default: true },
@@ -80,12 +80,13 @@ const authTokenSchema = new Schema({
   userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   tokenHash: { type: String, required: true, unique: true },
   purpose: { type: String, enum: ['verify-email', 'reset-password'], required: true },
+  attempts: { type: Number, min: 0, max: 5, default: 0 },
   expiresAt: { type: Date, required: true, expires: 0 },
 }, { timestamps: true });
 
 const notificationSchema = new Schema({
   userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-  kind: { type: String, enum: ['interview-created', 'interview-updated', 'interview-cancelled', 'interview-reminder'], required: true },
+  kind: { type: String, enum: ['interview-created', 'interview-updated', 'interview-cancelled', 'interview-reminder', 'company-verified', 'company-rejected', 'job-approved', 'job-rejected'], required: true },
   title: { type: String, required: true, maxlength: 140 },
   message: { type: String, required: true, maxlength: 500 },
   interviewId: { type: Schema.Types.ObjectId, ref: 'Interview' },
@@ -110,7 +111,24 @@ const jobSchema = new Schema({
   description: { type: String, required: true, maxlength: 8000 },
   deadline: { type: Date },
   status: { type: String, enum: ['open', 'closed'], default: 'open' },
+  companyId: { type: Schema.Types.ObjectId, ref: 'Company', index: true },
+  reviewStatus: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending', index: true },
+  reviewNote: { type: String, maxlength: 1000, default: '' },
+  reviewedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+  reviewedAt: { type: Date },
   createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+}, { timestamps: true });
+
+const companySchema = new Schema({
+  name: { type: String, required: true, trim: true, maxlength: 160 },
+  domain: { type: String, required: true, trim: true, lowercase: true, maxlength: 180 },
+  website: { type: String, required: true, trim: true, maxlength: 500 },
+  description: { type: String, trim: true, maxlength: 2000, default: '' },
+  submittedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true, unique: true, index: true },
+  status: { type: String, enum: ['pending', 'verified', 'rejected'], default: 'pending', index: true },
+  reviewNote: { type: String, maxlength: 1000, default: '' },
+  reviewedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+  reviewedAt: { type: Date },
 }, { timestamps: true });
 
 const applicationSchema = new Schema({
@@ -143,5 +161,6 @@ export const AuthToken: mongoose.Model<any> = (mongoose.models.AuthToken as mong
 export const Notification: mongoose.Model<any> = (mongoose.models.Notification as mongoose.Model<any> | undefined) ?? mongoose.model<any>('Notification', notificationSchema);
 export const Feedback: mongoose.Model<any> = (mongoose.models.Feedback as mongoose.Model<any> | undefined) ?? mongoose.model<any>('Feedback', feedbackSchema);
 export const Job: mongoose.Model<any> = (mongoose.models.Job as mongoose.Model<any> | undefined) ?? mongoose.model<any>('Job', jobSchema);
+export const Company: mongoose.Model<any> = (mongoose.models.Company as mongoose.Model<any> | undefined) ?? mongoose.model<any>('Company', companySchema);
 export const Application: mongoose.Model<any> = (mongoose.models.Application as mongoose.Model<any> | undefined) ?? mongoose.model<any>('Application', applicationSchema);
 export const Evaluation: mongoose.Model<any> = (mongoose.models.Evaluation as mongoose.Model<any> | undefined) ?? mongoose.model<any>('Evaluation', evaluationSchema);

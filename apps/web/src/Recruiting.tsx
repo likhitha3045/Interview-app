@@ -1,10 +1,12 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { ArrowRight, BriefcaseBusiness, Check, Plus, Sparkles, UserRound, Users, X } from 'lucide-react';
+import { CompanySubmissionPortal } from './CompanyWorkflow';
+export { CompanyReviewQueue } from './CompanyWorkflow';
 
 const API = import.meta.env.VITE_API_URL ?? 'http://localhost:4000';
-type Role = 'interviewer' | 'candidate' | 'recruiter';
+type Role = 'interviewer' | 'candidate' | 'recruiter' | 'company';
 type User = { id: string; name: string; email: string; role: Role };
-type Job = { _id: string; title: string; company: string; location: string; salary: string; experience: string; skills: string[]; description: string; deadline?: string; status: 'open' | 'closed' };
+type Job = { _id: string; title: string; company: string; location: string; salary: string; experience: string; skills: string[]; description: string; deadline?: string; status: 'open' | 'closed'; reviewStatus?: 'pending' | 'approved' | 'rejected'; reviewNote?: string };
 type Application = { _id: string; status: string; coverLetter: string; createdAt: string; jobId: Job; candidateId?: { _id: string; name: string; email: string; headline?: string; skills?: string[]; resumeUrl?: string } };
 type Profile = { name: string; email: string; role: Role; headline?: string; bio?: string; skills?: string[]; education?: Array<{ school: string; degree: string; year: string }>; projects?: Array<{ name: string; description: string; url?: string }>; resumeUrl?: string; company?: string };
 type Metrics = { totalCandidates: number; interviewsToday: number; applications: number; shortlisted: number; selected: number; jobCounts: Array<{ title: string; count: number }> };
@@ -47,6 +49,7 @@ export function JobsPage({ token, user }: { token: string; user: User }) {
     try { const updated = await request<Job>(`/api/jobs/${job._id}`, token, { method: 'PATCH', body: JSON.stringify({ status: job.status === 'open' ? 'closed' : 'open' }) }); setJobs((items) => items.map((item) => item._id === job._id ? updated : item)); }
     catch (err) { setError(err instanceof Error ? err.message : 'Could not update the job.'); }
   }
+  if (user.role === 'company') return <CompanySubmissionPortal token={token} />;
   return <section className="feature-page"><div className="feature-heading"><div><div className="eyebrow">OPPORTUNITIES</div><h2>{user.role === 'recruiter' ? 'Your job postings' : 'Find your next opportunity'}</h2><p>{user.role === 'recruiter' ? 'Post roles and follow every application from one place.' : 'Explore open roles and apply in a couple of clicks.'}</p></div>{user.role === 'recruiter' && <button className="button button-primary" onClick={() => setShowForm(true)}><Plus size={16} /> Create job</button>}</div>
     {notice && <div className="form-info">{notice}</div>}{error && <div className="form-error">{error}</div>}
     {showForm && <div className="modal-backdrop"><div className="modal-card"><div className="modal-top"><div className="modal-icon"><BriefcaseBusiness size={20} /></div><button className="icon-button" onClick={() => setShowForm(false)} aria-label="Close"><X size={19} /></button></div><div className="eyebrow">NEW OPPORTUNITY</div><h2>Create a job posting</h2><form onSubmit={createJob}><label className="field-label">Job title<input name="title" required maxLength={120} placeholder="Frontend Developer" /></label><label className="field-label">Company<input name="company" required maxLength={120} placeholder="Company name" /></label><div className="form-two-cols"><label className="field-label">Location<input name="location" required placeholder="Remote / city" /></label><label className="field-label">Salary range<input name="salary" placeholder="$80k–$110k" /></label></div><div className="form-two-cols"><label className="field-label">Experience<input name="experience" placeholder="2+ years" /></label><label className="field-label">Application deadline<input name="deadline" type="date" min={new Date().toISOString().slice(0, 10)} /></label></div><label className="field-label">Skills, comma-separated<input name="skills" placeholder="React, TypeScript, CSS" /></label><label className="field-label">Description<textarea name="description" required minLength={20} maxLength={8000} rows={5} placeholder="Describe the role, team and responsibilities…" /></label>{error && <div className="form-error">{error}</div>}<div className="modal-actions"><button type="button" className="button button-light" onClick={() => setShowForm(false)}>Cancel</button><button className="button button-primary" disabled={busy}>{busy ? 'Publishing…' : 'Publish job'}<ArrowRight size={16} /></button></div></form></div></div>}
@@ -82,7 +85,7 @@ export function ProfilePage({ token, user }: { token: string; user: User }) {
     const projects = String(data.get('projects') ?? '').split('\n').map((line) => line.trim()).filter(Boolean).map((line) => { const [name, url = ''] = line.split('|'); return { name: name?.trim() ?? '', url: url.trim(), description: '' }; });
     const education = String(data.get('education') ?? '').split('\n').map((line) => line.trim()).filter(Boolean).map((line) => { const [school, degree = '', year = ''] = line.split('|'); return { school: school?.trim() ?? '', degree: degree.trim(), year: year.trim() }; });
     try {
-      const updated = await request<Profile>('/api/profile', token, { method: 'PATCH', body: JSON.stringify({ headline: data.get('headline'), bio: data.get('bio'), skills: String(data.get('skills')).split(',').map((value) => value.trim()).filter(Boolean), resumeUrl: data.get('resumeUrl'), company: data.get('company'), education, projects }) });
+      const updated = await request<Profile>('/api/profile', token, { method: 'PATCH', body: JSON.stringify({ headline: data.get('headline'), bio: data.get('bio'), skills: String(data.get('skills')).split(',').map((value) => value.trim()).filter(Boolean), resumeUrl: data.get('resumeUrl'), ...(user.role === 'recruiter' ? { company: data.get('company') } : {}), education, projects }) });
       setProfile(updated); setSaved(true);
     } catch (err) { setError(err instanceof Error ? err.message : 'Could not save profile.'); }
     finally { setBusy(false); }

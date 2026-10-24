@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "concurrently -k -n server,web -c blue,green \"npm:dev --workspace=@interviewing/server\" \"npm:dev --workspace=@interviewing/web\"",
     "build": "npm run build --workspace=@interviewing/server && npm run build --workspace=@interviewing/web",
-    "lint": "npm run lint --workspace=@interviewing/server && npm run lint --workspace=@interviewing/web"
+    "lint": "npm run lint --workspace=@interviewing/server && npm run lint --workspace=@interviewing/web",
+    "test": "npm run test --workspace=@interviewing/server"
   },
   "devDependencies": { "concurrently": "^9.2.1" }
 }

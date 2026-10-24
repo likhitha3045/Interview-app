@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { createServer } from 'node:http';
-import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomInt, randomUUID } from 'node:crypto';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -12,8 +12,9 @@ import multer from 'multer';
 import { fileTypeFromBuffer } from 'file-type';
 import { Server } from 'socket.io';
 import { z } from 'zod';
-import { Application, AuthToken, ChatMessage, ChatUpload, CodeWorkspace, Conversation, Evaluation, Feedback, Interview, Job, Notification, User } from './models.js';
-import { clientUrl, isEmailConfigured, sendEmail, serverUrl } from './email.js';
+import { Application, AuthToken, ChatMessage, ChatUpload, CodeWorkspace, Company, Conversation, Evaluation, Feedback, Interview, Job, Notification, User } from './models.js';
+import { clientUrl, isEmailConfigured, sendEmail } from './email.js';
+import { isValidResumeContent } from './resumeValidation.js';
 
 const PORT = Number(process.env.PORT ?? 4000);
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -30,6 +31,8 @@ app.use(cors({ origin: CLIENT_ORIGIN }));
 app.use(helmet());
 app.use(express.json({ limit: '32kb' }));
 app.use('/api/auth', rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false }));
+const verificationRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: 'draft-8', legacyHeaders: false, message: { message: 'Too many verification attempts. Please wait before trying again.' } });
+const aiAssistantRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false, message: { message: 'You have reached the AI assistant limit. Please try again later.' } });
 app.use('/api', rateLimit({ windowMs: 60 * 1000, limit: 180, standardHeaders: 'draft-8', legacyHeaders: false, skip: (req) => req.path === '/health' }));
 const attachmentUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 }, fileFilter: (_req, file, callback) => {
   const safeMimeTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'application/pdf', 'text/plain'];
@@ -42,7 +45,7 @@ const resumeUpload = multer({ storage: multer.memoryStorage(), limits: { fileSiz
   else callback(new Error('Résumé must be a PDF or DOCX file.'));
 } });
 
-interface TokenPayload { userId: string; role: 'interviewer' | 'candidate' | 'recruiter'; name: string }
+interface TokenPayload { userId: string; role: 'interviewer' | 'candidate' | 'recruiter' | 'company'; name: string }
 const issueToken = (payload: TokenPayload) => jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
 const authenticate = (req: Request, res: Response, next: NextFunction) => {
   const token = req.headers.authorization?.replace(/^Bearer\s+/i, '');
@@ -62,11 +65,18 @@ const authenticate = (req: Request, res: Response, next: NextFunction) => {
 const asyncRoute = (handler: (req: Request, res: Response) => Promise<unknown>) =>
   (req: Request, res: Response, next: NextFunction) => { void handler(req, res).catch(next); };
 const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
-const issueOneTimeToken = async (userId: string, purpose: 'verify-email' | 'reset-password') => {
+const issueOneTimeToken = async (userId: string, purpose: 'reset-password') => {
   await AuthToken.deleteMany({ userId, purpose });
   const token = randomBytes(32).toString('hex');
   await AuthToken.create({ userId, purpose, tokenHash: tokenHash(token), expiresAt: new Date(Date.now() + 60 * 60 * 1000) });
   return token;
+};
+const hashVerificationCode = (userId: string, code: string) => createHmac('sha256', JWT_SECRET).update(`${userId}:${code}`).digest('hex');
+const issueVerificationCode = async (userId: string) => {
+  await AuthToken.deleteMany({ userId, purpose: 'verify-email' });
+  const code = String(randomInt(100_000, 1_000_000));
+  await AuthToken.create({ userId, purpose: 'verify-email', tokenHash: hashVerificationCode(userId, code), attempts: 0, expiresAt: new Date(Date.now() + 10 * 60 * 1000) });
+  return code;
 };
 const publishNotification = async (user: any, interview: any, kind: string, title: string, message: string, deliverEmail = true) => {
   const notification = await Notification.create({ userId: user._id, interviewId: interview._id, kind, title, message });
@@ -105,8 +115,8 @@ app.get('/api/rtc/ice-servers', authenticate, (_req, res) => {
   res.json({ iceServers });
 });
 
-app.post('/api/auth/register', asyncRoute(async (req, res) => {
-  const schema = z.object({ name: z.string().trim().min(2).max(80), email: z.string().email(), password: z.string().min(8).max(128), role: z.enum(['interviewer', 'candidate', 'recruiter']), interviewerCode: z.string().optional() });
+app.post('/api/auth/register', verificationRateLimit, asyncRoute(async (req, res) => {
+  const schema = z.object({ name: z.string().trim().min(2).max(80), email: z.string().email(), password: z.string().min(8).max(128), role: z.enum(['interviewer', 'candidate', 'recruiter', 'company']), interviewerCode: z.string().optional() });
   const input = schema.safeParse(req.body);
   if (!input.success) return res.status(400).json({ message: 'Enter a valid name, email, password (8+ characters), and role.' });
   if (input.data.role === 'interviewer' && process.env.NODE_ENV === 'production' && (!process.env.INTERVIEWER_SIGNUP_CODE || input.data.interviewerCode !== process.env.INTERVIEWER_SIGNUP_CODE)) return res.status(403).json({ message: 'Interviewer registration requires an organization invitation code.' });
@@ -114,10 +124,9 @@ app.post('/api/auth/register', asyncRoute(async (req, res) => {
   const email = input.data.email.toLowerCase();
   if (await User.exists({ email })) return res.status(409).json({ message: 'An account with that email already exists.' });
   const user = await User.create({ name: input.data.name, email, role: input.data.role, passwordHash: await bcrypt.hash(input.data.password, 12) });
-  const verificationToken = await issueOneTimeToken(String(user._id), 'verify-email');
-  const verificationUrl = serverUrl(`/api/auth/verify-email?token=${verificationToken}`);
-  const emailDelivered = await sendEmail(user.email, 'Verify your Interviewly email', 'Verify your email address to activate your Interviewly account. This link expires in one hour.', verificationUrl);
-  res.status(201).json({ message: emailDelivered ? 'Account created. Check your email for a verification link before signing in.' : 'SMTP is not configured, so no email was sent. Use the local verification link below.', ...(!emailDelivered && !isEmailConfigured() ? { developmentUrl: verificationUrl } : {}) });
+  const verificationCode = await issueVerificationCode(String(user._id));
+  const emailDelivered = await sendEmail(user.email, 'Your Interviewly verification code', `Your email verification code is ${verificationCode}. It expires in 10 minutes.`);
+  res.status(201).json({ message: emailDelivered ? 'Account created. Enter the verification code sent to your email.' : 'SMTP is not configured, so no email was sent. Use the local verification code below.', ...(!emailDelivered && !isEmailConfigured() ? { developmentCode: verificationCode } : {}) });
 }));
 
 app.post('/api/auth/login', asyncRoute(async (req, res) => {
@@ -125,16 +134,30 @@ app.post('/api/auth/login', asyncRoute(async (req, res) => {
   if (!input.success) return res.status(400).json({ message: 'Enter your email and password.' });
   const user = await User.findOne({ email: input.data.email.toLowerCase() }).select('+passwordHash');
   if (!user || !(await bcrypt.compare(input.data.password, user.passwordHash))) return res.status(401).json({ message: 'Email or password is incorrect.' });
-  if (user.emailVerified === false) return res.status(403).json({ message: 'Verify your email using the link we sent before signing in.' });
+  // Treat older accounts without the field as unverified too; only an explicit
+  // successful email verification should allow sign-in.
+  if (user.emailVerified !== true) return res.status(403).json({ code: 'EMAIL_NOT_VERIFIED', message: 'Verify your email using the code we sent before signing in.' });
   const id = String(user._id);
   res.json({ token: issueToken({ userId: id, name: user.name, role: user.role }), user: { id, name: user.name, email: user.email, role: user.role } });
 }));
 
-app.get('/api/auth/verify-email', asyncRoute(async (req, res) => {
-  const token = typeof req.query.token === 'string' ? req.query.token : '';
-  const record = token ? await AuthToken.findOneAndDelete({ tokenHash: tokenHash(token), purpose: 'verify-email', expiresAt: { $gt: new Date() } }) : null;
-  if (!record) return res.status(400).send('This verification link is invalid or expired. Please request a new one.');
-  const user = await User.findByIdAndUpdate(record.userId, { emailVerified: true }, { new: true });
+app.post('/api/auth/verify-email', verificationRateLimit, asyncRoute(async (req, res) => {
+  const input = z.object({ email: z.string().email(), code: z.string().regex(/^\d{6}$/) }).safeParse(req.body);
+  if (!input.success) return res.status(400).json({ message: 'Enter the email address and 6-digit verification code.' });
+  const user = await User.findOne({ email: input.data.email.toLowerCase(), emailVerified: { $ne: true } });
+  if (!user) return res.status(400).json({ message: 'That verification code is invalid or expired. Request a new code and try again.' });
+  const now = new Date();
+  const record = await AuthToken.findOne({ userId: user._id, purpose: 'verify-email', expiresAt: { $gt: now }, attempts: { $lt: 5 } });
+  if (!record) return res.status(400).json({ message: 'That verification code is invalid or expired. Request a new code and try again.' });
+  const codeHash = hashVerificationCode(String(user._id), input.data.code);
+  if (record.tokenHash !== codeHash) {
+    await AuthToken.updateOne({ _id: record._id, attempts: { $lt: 5 } }, { $inc: { attempts: 1 } });
+    return res.status(400).json({ message: 'That verification code is invalid or expired. Request a new code and try again.' });
+  }
+  const consumed = await AuthToken.findOneAndDelete({ _id: record._id, tokenHash: codeHash, expiresAt: { $gt: now }, attempts: { $lt: 5 } });
+  if (!consumed) return res.status(400).json({ message: 'That verification code is invalid or expired. Request a new code and try again.' });
+  user.emailVerified = true;
+  await user.save();
   if (user?.role === 'candidate') {
     const pending = await Interview.find({ candidate: null, candidateEmail: user.email, status: 'scheduled' }).limit(50);
     for (const interview of pending) {
@@ -142,21 +165,24 @@ app.get('/api/auth/verify-email', asyncRoute(async (req, res) => {
       if (claimed) await publishNotification(user, claimed, 'interview-created', 'Interview invitation', `You’ve been added to “${claimed.title}”.`, false);
     }
   }
-  res.redirect(`${CLIENT_ORIGIN}/?verified=1${user?.email ? `&email=${encodeURIComponent(user.email)}` : ''}`);
+  res.json({ message: 'Email verified. You can now sign in.' });
 }));
 
-app.post('/api/auth/resend-verification', asyncRoute(async (req, res) => {
+app.post('/api/auth/resend-verification', verificationRateLimit, asyncRoute(async (req, res) => {
   const input = z.object({ email: z.string().email() }).safeParse(req.body);
+  let developmentCode: string | undefined;
   if (input.success) {
-    const user = await User.findOne({ email: input.data.email.toLowerCase(), emailVerified: false });
+    const user = await User.findOne({ email: input.data.email.toLowerCase(), emailVerified: { $ne: true } });
     if (user) {
-      const verificationToken = await issueOneTimeToken(String(user._id), 'verify-email');
-      const verificationUrl = serverUrl(`/api/auth/verify-email?token=${verificationToken}`);
-      const emailDelivered = await sendEmail(user.email, 'Verify your Interviewly email', 'Verify your email address to activate your Interviewly account. This link expires in one hour.', verificationUrl);
-      if (!emailDelivered && !isEmailConfigured() && process.env.NODE_ENV !== 'production') return res.json({ message: 'SMTP is not configured, so no email was sent. Use the local verification link below.', developmentUrl: verificationUrl });
+      const recentCode = await AuthToken.findOne({ userId: user._id, purpose: 'verify-email', attempts: { $exists: true }, createdAt: { $gt: new Date(Date.now() - 60 * 1000) } });
+      if (!recentCode) {
+        const code = await issueVerificationCode(String(user._id));
+        const emailDelivered = await sendEmail(user.email, 'Your Interviewly verification code', `Your email verification code is ${code}. It expires in 10 minutes.`);
+        if (!emailDelivered && !isEmailConfigured() && process.env.NODE_ENV !== 'production') developmentCode = code;
+      }
     }
   }
-  res.json({ message: 'If the account needs verification, a new link has been sent.' });
+  res.json({ message: 'If the account needs verification, a code has been sent. Wait one minute before requesting another code.', ...(developmentCode ? { developmentCode, developmentMessage: 'SMTP is not configured; this code is for local development only.' } : {}) });
 }));
 
 app.post('/api/auth/forgot-password', asyncRoute(async (req, res) => {
@@ -233,9 +259,7 @@ app.post('/api/profile/resume', authenticate, (req, res, next) => {
   const currentUser = res.locals.user as TokenPayload;
   if (!req.file) return res.status(400).json({ message: 'Choose a PDF or DOCX résumé under 10 MB.' });
   const data = req.file.buffer;
-  const isPdf = data.subarray(0, 5).toString() === '%PDF-';
-  const isDocx = data.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
-  if ((req.file.mimetype === 'application/pdf' && !isPdf) || (req.file.mimetype.endsWith('wordprocessingml.document') && !isDocx)) return res.status(400).json({ message: 'The file contents do not match the selected résumé type.' });
+  if (!isValidResumeContent(req.file.mimetype, data)) return res.status(400).json({ message: 'The file contents do not match the selected résumé type.' });
   const safeName = req.file.originalname.replace(/[\\/\r\n\0]/g, '_').slice(0, 180);
   const resume = await ChatUpload.create({ ownerId: currentUser.userId, conversationId: `resume:${currentUser.userId}`, originalName: safeName, mimeType: req.file.mimetype, size: req.file.size, data, expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000) });
   const resumeUrl = `/api/profile/resume/${String(resume._id)}`;
@@ -251,8 +275,8 @@ app.get('/api/profile/resume/:id', authenticate, asyncRoute(async (req, res) => 
   const isOwner = String(resume.ownerId) === currentUser.userId;
   let recruiterAuthorized = false;
   if (!isOwner && currentUser.role === 'recruiter') {
-    const application = await Application.findOne({ candidateId: resume.ownerId }).select('jobId').lean() as { jobId: unknown } | null;
-    if (application) recruiterAuthorized = Boolean(await Job.exists({ _id: application.jobId, createdBy: currentUser.userId }));
+    const recruiterJobIds = await Job.find({ $or: [{ createdBy: currentUser.userId }, { reviewedBy: currentUser.userId, companyId: { $exists: true } }] }).distinct('_id');
+    recruiterAuthorized = Boolean(await Application.exists({ candidateId: resume.ownerId, jobId: { $in: recruiterJobIds } }));
   }
   if (!isOwner && !recruiterAuthorized) return res.status(403).json({ message: 'You do not have access to this résumé.' });
   res.setHeader('Content-Type', resume.mimeType);
@@ -270,18 +294,111 @@ app.patch('/api/profile', authenticate, asyncRoute(async (req, res) => {
   res.json(profile);
 }));
 
+app.get('/api/company/submission', authenticate, asyncRoute(async (_req, res) => {
+  const currentUser = res.locals.user as TokenPayload;
+  if (currentUser.role !== 'company') return res.status(403).json({ message: 'Company account required.' });
+  res.json(await Company.findOne({ submittedBy: currentUser.userId }).lean());
+}));
+
+app.post('/api/company/submission', authenticate, asyncRoute(async (req, res) => {
+  const currentUser = res.locals.user as TokenPayload;
+  if (currentUser.role !== 'company') return res.status(403).json({ message: 'Company account required.' });
+  const input = z.object({ name: z.string().trim().min(2).max(160), domain: z.string().trim().toLowerCase().regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/), website: z.string().url().max(500), description: z.string().trim().max(2000).default('') }).safeParse(req.body);
+  if (!input.success) return res.status(400).json({ message: 'Enter a company name, valid domain, and website.' });
+  const account = await User.findById(currentUser.userId).select('email').lean() as { email: string } | null;
+  if (!account || account.email.split('@')[1]?.toLowerCase() !== input.data.domain) return res.status(400).json({ message: 'Use a company email address whose domain matches the company domain.' });
+  const websiteHost = new URL(input.data.website).hostname.toLowerCase().replace(/^www\./, '');
+  if (websiteHost !== input.data.domain && !websiteHost.endsWith(`.${input.data.domain}`)) return res.status(400).json({ message: 'The website must belong to the company domain you entered.' });
+  const existing = await Company.findOne({ submittedBy: currentUser.userId });
+  if (existing?.status === 'verified') return res.status(409).json({ message: 'This company is already verified. Contact a recruiter if its details need changing.' });
+  const company = await Company.findOneAndUpdate({ submittedBy: currentUser.userId }, { ...input.data, status: 'pending', reviewNote: '', reviewedBy: undefined, reviewedAt: undefined }, { new: true, upsert: true, runValidators: true });
+  res.status(201).json(company);
+}));
+
+app.get('/api/recruiter/company-submissions', authenticate, asyncRoute(async (_req, res) => {
+  const currentUser = res.locals.user as TokenPayload;
+  if (currentUser.role !== 'recruiter') return res.status(403).json({ message: 'Recruiter access required.' });
+  res.json(await Company.find({ status: 'pending' }).populate('submittedBy', 'name email emailVerified').sort({ createdAt: 1 }).lean());
+}));
+
+app.patch('/api/recruiter/company-submissions/:id', authenticate, asyncRoute(async (req, res) => {
+  const currentUser = res.locals.user as TokenPayload;
+  if (currentUser.role !== 'recruiter') return res.status(403).json({ message: 'Recruiter access required.' });
+  const input = z.object({ status: z.enum(['verified', 'rejected']), reviewNote: z.string().trim().max(1000).default('') }).safeParse(req.body);
+  if (!input.success) return res.status(400).json({ message: 'Choose whether the company is verified or rejected.' });
+  const company = await Company.findOneAndUpdate({ _id: req.params.id, status: 'pending' }, { status: input.data.status, reviewNote: input.data.reviewNote, reviewedBy: currentUser.userId, reviewedAt: new Date() }, { new: true }).populate('submittedBy', 'name email emailPreferences');
+  if (!company) return res.status(404).json({ message: 'Pending company submission not found.' });
+  const companyUser = company.submittedBy as any;
+  const companyMessage = input.data.status === 'verified' ? `${company.name} has been verified. You can submit vacancies for recruiter approval.` : `The company verification for ${company.name} was rejected. ${input.data.reviewNote}`;
+  const companyNotification = await Notification.create({ userId: companyUser._id, kind: input.data.status === 'verified' ? 'company-verified' : 'company-rejected', title: input.data.status === 'verified' ? 'Company verified' : 'Company verification update', message: companyMessage });
+  io.to(`user:${String(companyUser._id)}`).emit('notification', { id: String(companyNotification._id), title: companyNotification.title, message: companyNotification.message, createdAt: companyNotification.createdAt, readAt: null });
+  if (companyUser.emailPreferences !== false) void sendEmail(companyUser.email, companyNotification.title, companyMessage, clientUrl('/')).catch((error: unknown) => console.error('Unable to deliver company review email:', error));
+  res.json(company);
+}));
+
+app.get('/api/recruiter/job-submissions', authenticate, asyncRoute(async (_req, res) => {
+  const currentUser = res.locals.user as TokenPayload;
+  if (currentUser.role !== 'recruiter') return res.status(403).json({ message: 'Recruiter access required.' });
+  res.json(await Job.find({ companyId: { $exists: true }, reviewStatus: 'pending' }).populate('companyId').populate('createdBy', 'name email').sort({ createdAt: 1 }).lean());
+}));
+
+app.patch('/api/recruiter/job-submissions/:id', authenticate, asyncRoute(async (req, res) => {
+  const currentUser = res.locals.user as TokenPayload;
+  if (currentUser.role !== 'recruiter') return res.status(403).json({ message: 'Recruiter access required.' });
+  const input = z.object({ status: z.enum(['approved', 'rejected']), reviewNote: z.string().trim().max(1000).default('') }).safeParse(req.body);
+  if (!input.success) return res.status(400).json({ message: 'Choose whether the job should be posted or rejected.' });
+  const job = await Job.findOne({ _id: req.params.id, companyId: { $exists: true }, reviewStatus: 'pending' });
+  if (!job) return res.status(404).json({ message: 'Pending company job submission not found.' });
+  if (input.data.status === 'approved') {
+    const company = await Company.findOne({ _id: job.companyId, status: 'verified' });
+    if (!company) return res.status(409).json({ message: 'Verify this company before approving its job postings.' });
+  }
+  job.reviewStatus = input.data.status;
+  job.reviewNote = input.data.reviewNote;
+  job.reviewedBy = currentUser.userId;
+  job.reviewedAt = new Date();
+  job.status = input.data.status === 'approved' ? 'open' : 'closed';
+  await job.save();
+  const company = await Company.findById(job.companyId).populate('submittedBy', 'name email emailPreferences');
+  const companyUser = company?.submittedBy as any;
+  if (companyUser) {
+    const jobMessage = input.data.status === 'approved' ? `Your vacancy “${job.title}” was approved and is now published.` : `Your vacancy “${job.title}” was not approved. ${input.data.reviewNote}`;
+    const jobNotification = await Notification.create({ userId: companyUser._id, kind: input.data.status === 'approved' ? 'job-approved' : 'job-rejected', title: input.data.status === 'approved' ? 'Vacancy published' : 'Vacancy review update', message: jobMessage });
+    io.to(`user:${String(companyUser._id)}`).emit('notification', { id: String(jobNotification._id), title: jobNotification.title, message: jobNotification.message, createdAt: jobNotification.createdAt, readAt: null });
+    if (companyUser.emailPreferences !== false) void sendEmail(companyUser.email, jobNotification.title, jobMessage, clientUrl('/')).catch((error: unknown) => console.error('Unable to deliver job review email:', error));
+  }
+  res.json(job);
+}));
+
 app.get('/api/jobs', authenticate, asyncRoute(async (_req, res) => {
   const currentUser = res.locals.user as TokenPayload;
-  const filter = currentUser.role === 'recruiter' ? { createdBy: currentUser.userId } : { status: 'open', $or: [{ deadline: { $exists: false } }, { deadline: { $gte: new Date() } }] };
+  const filter = currentUser.role === 'recruiter'
+    ? { $or: [{ createdBy: currentUser.userId }, { companyId: { $exists: true }, reviewStatus: 'pending' }] }
+    : currentUser.role === 'company'
+      ? { createdBy: currentUser.userId }
+      : { status: 'open', $and: [{ $or: [{ reviewStatus: 'approved' }, { reviewStatus: { $exists: false } }] }, { $or: [{ deadline: { $exists: false } }, { deadline: { $gte: new Date() } }] }] };
   res.json(await Job.find(filter).populate('createdBy', 'name company').sort({ createdAt: -1 }).lean());
 }));
 
 app.post('/api/jobs', authenticate, asyncRoute(async (req, res) => {
   const currentUser = res.locals.user as TokenPayload;
+  if (currentUser.role === 'company') return res.status(403).json({ message: 'Companies submit vacancies for review using the company job submission route.' });
   if (currentUser.role !== 'recruiter') return res.status(403).json({ message: 'Only recruiters can publish jobs.' });
   const input = z.object({ title: z.string().trim().min(2).max(120), company: z.string().trim().min(2).max(120), location: z.string().trim().min(2).max(120), salary: z.string().trim().max(120).default(''), experience: z.string().trim().max(80).default(''), skills: z.array(z.string().trim().min(1).max(50)).max(30).default([]), description: z.string().trim().min(20).max(8000), deadline: z.string().datetime().optional() }).safeParse(req.body);
   if (!input.success) return res.status(400).json({ message: 'Add a title, company, location, and a description of at least 20 characters.' });
-  const job = await Job.create({ ...input.data, deadline: input.data.deadline ? new Date(input.data.deadline) : undefined, createdBy: currentUser.userId });
+  const job = await Job.create({ ...input.data, deadline: input.data.deadline ? new Date(input.data.deadline) : undefined, createdBy: currentUser.userId, reviewStatus: 'approved', reviewedBy: currentUser.userId, reviewedAt: new Date() });
+  res.status(201).json(job);
+}));
+
+app.post('/api/company/jobs', authenticate, asyncRoute(async (req, res) => {
+  const currentUser = res.locals.user as TokenPayload;
+  if (currentUser.role !== 'company') return res.status(403).json({ message: 'Company account required.' });
+  const company = await Company.findOne({ submittedBy: currentUser.userId });
+  if (!company) return res.status(409).json({ message: 'Submit your company profile before submitting a vacancy.' });
+  if (company.status === 'rejected') return res.status(403).json({ message: 'Your company submission was rejected. Contact a recruiter for details.' });
+  const input = z.object({ title: z.string().trim().min(2).max(120), location: z.string().trim().min(2).max(120), salary: z.string().trim().max(120).default(''), experience: z.string().trim().max(80).default(''), skills: z.array(z.string().trim().min(1).max(50)).max(30).default([]), description: z.string().trim().min(20).max(8000), deadline: z.string().datetime().optional() }).safeParse(req.body);
+  if (!input.success) return res.status(400).json({ message: 'Add a title, location, and a description of at least 20 characters.' });
+  const job = await Job.create({ ...input.data, company: company.name, companyId: company._id, deadline: input.data.deadline ? new Date(input.data.deadline) : undefined, createdBy: currentUser.userId, status: 'closed', reviewStatus: 'pending' });
   res.status(201).json(job);
 }));
 
@@ -318,7 +435,8 @@ app.post('/api/jobs/:id/applications', authenticate, asyncRoute(async (req, res)
 
 app.get('/api/applications', authenticate, asyncRoute(async (_req, res) => {
   const currentUser = res.locals.user as TokenPayload;
-  const filter = currentUser.role === 'candidate' ? { candidateId: currentUser.userId } : currentUser.role === 'recruiter' ? { jobId: { $in: await Job.find({ createdBy: currentUser.userId }).distinct('_id') } } : { candidateId: currentUser.userId };
+  const recruiterJobIds = currentUser.role === 'recruiter' ? await Job.find({ $or: [{ createdBy: currentUser.userId }, { reviewedBy: currentUser.userId, companyId: { $exists: true } }] }).distinct('_id') : [];
+  const filter = currentUser.role === 'candidate' ? { candidateId: currentUser.userId } : currentUser.role === 'recruiter' ? { jobId: { $in: recruiterJobIds } } : { candidateId: currentUser.userId };
   res.json(await Application.find(filter).populate('jobId').populate('candidateId', 'name email headline skills resumeUrl').sort({ createdAt: -1 }).lean());
 }));
 
@@ -327,7 +445,7 @@ app.patch('/api/applications/:id/status', authenticate, asyncRoute(async (req, r
   if (currentUser.role !== 'recruiter') return res.status(403).json({ message: 'Only recruiters can update application stages.' });
   const input = z.object({ status: z.enum(['shortlisted', 'assessment', 'technical-interview', 'hr-interview', 'selected', 'rejected']) }).safeParse(req.body);
   if (!input.success) return res.status(400).json({ message: 'Invalid application stage.' });
-  const jobIds = await Job.find({ createdBy: currentUser.userId }).distinct('_id');
+  const jobIds = await Job.find({ $or: [{ createdBy: currentUser.userId }, { reviewedBy: currentUser.userId, companyId: { $exists: true } }] }).distinct('_id');
   const application = await Application.findOneAndUpdate({ _id: req.params.id, jobId: { $in: jobIds } }, { status: input.data.status }, { new: true }).populate('jobId');
   if (!application) return res.status(404).json({ message: 'Application not found.' });
   const candidate = await User.findById(application.candidateId);
@@ -342,7 +460,7 @@ app.patch('/api/applications/:id/status', authenticate, asyncRoute(async (req, r
 app.get('/api/recruiter/metrics', authenticate, asyncRoute(async (_req, res) => {
   const currentUser = res.locals.user as TokenPayload;
   if (currentUser.role !== 'recruiter') return res.status(403).json({ message: 'Recruiter access required.' });
-  const jobs = await Job.find({ createdBy: currentUser.userId }).distinct('_id');
+  const jobs = await Job.find({ $or: [{ createdBy: currentUser.userId }, { reviewedBy: currentUser.userId, companyId: { $exists: true } }] }).distinct('_id');
   const [candidateCount, statusGroups, upcomingInterviews, jobCounts] = await Promise.all([
     User.countDocuments({ role: 'candidate' }),
     Application.aggregate([{ $match: { jobId: { $in: jobs } } }, { $group: { _id: '$status', count: { $sum: 1 } } }]),
@@ -350,6 +468,29 @@ app.get('/api/recruiter/metrics', authenticate, asyncRoute(async (_req, res) => 
     Application.aggregate([{ $match: { jobId: { $in: jobs } } }, { $group: { _id: '$jobId', count: { $sum: 1 } } }, { $lookup: { from: 'jobs', localField: '_id', foreignField: '_id', as: 'job' } }, { $unwind: '$job' }, { $project: { title: '$job.title', count: 1 } }]),
   ]);
   res.json({ totalCandidates: candidateCount, interviewsToday: upcomingInterviews, applications: statusGroups.reduce((total: number, group: { count: number }) => total + group.count, 0), shortlisted: statusGroups.find((group: { _id: string }) => group._id === 'shortlisted')?.count ?? 0, selected: statusGroups.find((group: { _id: string }) => group._id === 'selected')?.count ?? 0, jobCounts });
+}));
+
+app.get('/api/recruiter/users', authenticate, asyncRoute(async (_req, res) => {
+  const currentUser = res.locals.user as TokenPayload;
+  if (currentUser.role !== 'recruiter') return res.status(403).json({ message: 'Recruiter access required.' });
+  const jobIds = await Job.find({ $or: [{ createdBy: currentUser.userId }, { reviewedBy: currentUser.userId, companyId: { $exists: true } }] }).distinct('_id');
+  const candidateIds = await Application.find({ jobId: { $in: jobIds } }).distinct('candidateId');
+  const users = await User.find({ _id: { $in: candidateIds } }).select('name email role headline skills resumeUrl isActive lastSeenAt createdAt').sort({ createdAt: -1 }).lean();
+  res.json(users);
+}));
+
+app.patch('/api/recruiter/users/:id/status', authenticate, asyncRoute(async (req, res) => {
+  const currentUser = res.locals.user as TokenPayload;
+  if (currentUser.role !== 'recruiter') return res.status(403).json({ message: 'Recruiter access required.' });
+  const input = z.object({ active: z.boolean() }).safeParse(req.body);
+  if (!input.success || !mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ message: 'Choose a valid account status.' });
+  const jobIds = await Job.find({ $or: [{ createdBy: currentUser.userId }, { reviewedBy: currentUser.userId, companyId: { $exists: true } }] }).distinct('_id');
+  const hasApplication = await Application.exists({ candidateId: req.params.id, jobId: { $in: jobIds } });
+  if (!hasApplication) return res.status(404).json({ message: 'Candidate not found in your applicant pool.' });
+  const candidate = await User.findOneAndUpdate({ _id: req.params.id, role: 'candidate' }, { isActive: input.data.active }, { new: true }).select('name email isActive');
+  if (!candidate) return res.status(404).json({ message: 'Candidate not found.' });
+  if (!input.data.active) for (const socketId of onlineSockets.get(String(candidate._id)) ?? []) io.sockets.sockets.get(socketId)?.disconnect(true);
+  res.json({ id: String(candidate._id), name: candidate.name, email: candidate.email, isActive: candidate.isActive });
 }));
 
 app.post('/api/ai/interview-questions', authenticate, asyncRoute(async (req, res) => {
@@ -366,6 +507,37 @@ app.post('/api/ai/interview-questions', authenticate, asyncRoute(async (req, res
   const questions = result.choices?.[0]?.message?.content?.trim();
   if (!questions) return res.status(502).json({ message: 'The AI provider returned no questions.' });
   res.json({ questions });
+}));
+
+app.post('/api/ai/chat', authenticate, aiAssistantRateLimit, asyncRoute(async (req, res) => {
+  const input = z.object({
+    messages: z.array(z.object({ role: z.enum(['user', 'assistant']), content: z.string().trim().min(1).max(3000) })).min(1).max(12),
+  }).safeParse(req.body);
+  if (!input.success || input.data.messages[input.data.messages.length - 1]?.role !== 'user') {
+    return res.status(400).json({ message: 'Send a message to start the conversation.' });
+  }
+  const key = process.env.AI_API_KEY;
+  if (!key) return res.status(503).json({ message: 'The AI assistant is not configured yet. Add AI_API_KEY to apps/server/.env, then restart the server.' });
+  const endpoint = process.env.AI_API_URL ?? 'https://api.openai.com/v1/chat/completions';
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: process.env.AI_MODEL ?? 'gpt-4o-mini',
+      temperature: 0.6,
+      max_tokens: 1200,
+      messages: [
+        { role: 'system', content: 'You are Interviewly AI, a helpful general-purpose assistant. Answer a broad range of questions clearly and respectfully. When useful, help with interview preparation, careers, learning, and the Interviewly app. Be honest when uncertain, do not claim to have browsed the web, and keep answers practical.' },
+        ...input.data.messages.slice(-12),
+      ],
+    }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) return res.status(502).json({ message: 'The AI provider could not answer right now. Check the configured AI provider and try again.' });
+  const result = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+  const answer = result.choices?.[0]?.message?.content?.trim();
+  if (!answer) return res.status(502).json({ message: 'The AI provider returned an empty answer. Please try again.' });
+  res.json({ answer });
 }));
 
 app.post('/api/interviews', authenticate, asyncRoute(async (req, res) => {

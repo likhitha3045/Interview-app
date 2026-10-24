@@ -1,19 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { io, type Socket } from 'socket.io-client';
 import {
-  ArrowDownLeft, ArrowLeft, ArrowRight, Bell, BriefcaseBusiness, CalendarDays, Check, ChevronDown, CircleHelp,
+  ArrowDownLeft, ArrowLeft, ArrowRight, Bell, BookOpen, Bot, BriefcaseBusiness, CalendarDays, Check, ChevronDown, CircleHelp,
   Clock3, Code2, Copy, FileText, LogOut, Menu, MessageCircle, Mic, MicOff,
   Maximize2, Paperclip, Plus, ScreenShare, Search, Settings2, ShieldCheck, Sparkles, Video, VideoOff,
   UserRound, Users, X,
 } from 'lucide-react';
-import { ApplicationsPage, CandidateEvaluationModal, EvaluationModal, JobsPage, ProfilePage, RecruiterDashboard } from './Recruiting';
+import { ApplicationsPage, CandidateEvaluationModal, CompanyReviewQueue, EvaluationModal, JobsPage, ProfilePage, RecruiterDashboard } from './Recruiting';
 import { ConversationsPage } from './Conversations';
 import { CollaborativeEditor } from './CollaborativeEditor';
 import { ResumeUploadPanel } from './ResumeUploadPanel';
+import { CandidateManagement } from './CandidateManagement';
+import { MockPractice } from './MockPractice';
+import { AiAssistant } from './AiAssistant';
 
 const API = import.meta.env.VITE_API_URL ?? 'http://localhost:4000';
-type Role = 'interviewer' | 'candidate' | 'recruiter';
-type AuthMode = 'login' | 'register' | 'forgot' | 'reset';
+type Role = 'interviewer' | 'candidate' | 'recruiter' | 'company';
+type AuthMode = 'login' | 'register' | 'verify' | 'forgot' | 'reset';
 type User = { id: string; name: string; email: string; role: Role };
 type Person = { _id?: string; id?: string; name: string; email?: string };
 type Interview = { _id: string; title: string; roomCode: string; scheduledAt: string; durationMinutes: number; interviewType: 'technical' | 'behavioral' | 'hr' | 'other'; instructions?: string; status: 'scheduled' | 'in-progress' | 'completed' | 'cancelled'; interviewer: Person; candidate: Person | null; candidateEmail?: string };
@@ -53,11 +56,11 @@ async function cancelInterview(item: Interview, token: string, setInterviews: (u
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState(() => localStorage.getItem('interviewly_token') ?? '');
+  const [token, setToken] = useState(() => { localStorage.removeItem('interviewly_token'); return ''; });
   const [interviews, setInterviews] = useState<Interview[]>([]);
   const [loading, setLoading] = useState(Boolean(token));
-  const [authMode, setAuthMode] = useState<AuthMode>(() => { const params = new URLSearchParams(window.location.search); return params.has('reset') ? 'reset' : params.get('register') === '1' ? 'register' : 'login'; });
-  const [section, setSection] = useState<'overview' | 'interviews' | 'history' | 'jobs' | 'applications' | 'profile' | 'chats'>('overview');
+  const [authMode, setAuthMode] = useState<AuthMode>(() => { const params = new URLSearchParams(window.location.search); return params.has('reset') ? 'reset' : params.get('register') === '1' ? 'register' : params.has('verify') ? 'verify' : 'login'; });
+  const [section, setSection] = useState<'overview' | 'interviews' | 'history' | 'jobs' | 'applications' | 'profile' | 'chats' | 'candidates' | 'review' | 'practice' | 'assistant'>('overview');
   const [search, setSearch] = useState('');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [showSchedule, setShowSchedule] = useState(false);
@@ -125,15 +128,19 @@ export default function App() {
   const history = useMemo(() => interviews.filter((item) => item.status === 'completed' || item.status === 'cancelled'), [interviews]);
 
   if (loading) return <div className="loading-screen"><div className="brand-mark"><Sparkles size={20} /></div><span>Getting your space ready…</span></div>;
-  if (!user || !token) return <AuthScreen mode={authMode} onModeChange={setAuthMode} onSuccess={(nextToken, nextUser) => { localStorage.setItem('interviewly_token', nextToken); setToken(nextToken); setUser(nextUser); }} initialMessage={verifiedMessage} />;
+  if (!user || !token) return <AuthScreen mode={authMode} onModeChange={setAuthMode} onSuccess={(nextToken, nextUser) => { setToken(nextToken); setUser(nextUser); }} initialMessage={verifiedMessage} />;
   if (activeInterview) return <CallRoom interview={activeInterview} token={token} user={user} onClose={() => setActiveInterview(null)} onStatusChange={handleInterviewStatus} />;
 
   const navItems = [
     { key: 'overview', label: 'Overview', icon: Code2 },
     { key: 'interviews', label: 'My interviews', icon: CalendarDays, count: upcoming.length },
     { key: 'history', label: 'History', icon: FileText },
+    { key: 'assistant', label: 'Ask AI', icon: Bot },
+    { key: 'practice', label: 'Mock practice', icon: BookOpen },
     { key: 'jobs', label: 'Jobs', icon: BriefcaseBusiness },
     { key: 'chats', label: 'Messages', icon: MessageCircle },
+    { key: 'candidates', label: 'Candidates', icon: UserRound },
+    { key: 'review', label: 'Company review', icon: Check },
     { key: 'applications', label: 'Applications', icon: Users },
     { key: 'profile', label: 'My profile', icon: UserRound },
   ] as const;
@@ -147,24 +154,30 @@ export default function App() {
       <div className="brand"><div className="brand-mark"><Sparkles size={20} strokeWidth={2.5} /></div><span>interviewly</span><button className="mobile-close" aria-label="Close menu" onClick={() => setMobileMenuOpen(false)}><X size={18} /></button></div>
       <div className="workspace-label">WORKSPACE <ChevronDown size={13} /></div>
       <nav className="nav-list" aria-label="Main navigation">
-        {navItems.filter(({ key }) => key !== 'applications' || user.role !== 'interviewer').map(({ key, label, icon: Icon, ...rest }) => <button key={key} onClick={() => { setSection(key); setMobileMenuOpen(false); }} className={`nav-item ${section === key ? 'selected' : ''}`}><Icon size={18} /><span>{label}</span>{'count' in rest && rest.count > 0 && <span className="nav-count">{rest.count}</span>}</button>)}
+        {navItems.filter(({ key }) => key !== 'applications' || user.role === 'candidate' || user.role === 'recruiter').filter(({ key }) => key !== 'review' || user.role === 'recruiter').filter(({ key }) => key !== 'candidates' || user.role === 'recruiter').filter(({ key }) => key !== 'jobs' || user.role !== 'interviewer').filter(({ key }) => key !== 'practice' || user.role === 'candidate').map(({ key, label, icon: Icon, ...rest }) => <button key={key} onClick={() => { setSection(key); setMobileMenuOpen(false); }} className={`nav-item ${section === key ? 'selected' : ''}`}><Icon size={18} /><span>{label}</span>{'count' in rest && rest.count > 0 && <span className="nav-count">{rest.count}</span>}</button>)}
       </nav>
       <div className="sidebar-bottom">
         <div className="side-help"><div className="help-icon"><CircleHelp size={18} /></div><div><strong>Need a hand?</strong><span>Visit our help center</span></div><ArrowRight size={15} /></div>
-        <div className="profile-card"><div className="avatar avatar-purple">{initials(user.name)}</div><div className="profile-copy"><strong>{user.name}</strong><span>{user.role === 'interviewer' ? 'Interviewer' : user.role === 'recruiter' ? 'Recruiter' : 'Candidate'}</span></div><button className="icon-button" onClick={logout} title="Sign out"><LogOut size={17} /></button></div>
+        <div className="profile-card"><div className="avatar avatar-purple">{initials(user.name)}</div><div className="profile-copy"><strong>{user.name}</strong><span>{user.role === 'interviewer' ? 'Interviewer' : user.role === 'recruiter' ? 'Recruiter' : user.role === 'company' ? 'Company' : 'Candidate'}</span></div><button className="icon-button" onClick={logout} title="Sign out"><LogOut size={17} /></button></div>
       </div>
     </aside>
     {mobileMenuOpen && <button className="mobile-scrim" aria-label="Close navigation" onClick={() => setMobileMenuOpen(false)} />}
     <main className="main-area">
-      <header className="topbar"><button className="icon-button hamburger" aria-label="Open menu" onClick={() => setMobileMenuOpen(true)}><Menu size={20} /></button><div className="breadcrumb">Workspace <span>/</span> <strong>{section === 'overview' ? 'Overview' : section === 'history' ? 'History' : section === 'interviews' ? 'My interviews' : section[0]!.toUpperCase() + section.slice(1)}</strong></div><div className="topbar-right"><label className="search-box"><Search size={16} /><input placeholder="Search interviews" aria-label="Search interviews" value={search} onChange={(event) => setSearch(event.target.value)} /><kbd>⌘ K</kbd></label><button className="icon-button notification-button" title="Notifications" onClick={() => setNotificationsOpen((open) => !open)}><Bell size={18} />{notifications > 0 && <i />}</button><div className="top-avatar">{initials(user.name)}</div></div>{notificationsOpen && <div className="notification-popover"><div className="popover-heading"><strong>Notifications</strong><button onClick={() => void markNotificationsRead()}>Mark all read</button></div>{notificationItems.length ? notificationItems.map((item) => <div className={`notification-item ${!item.readAt ? 'unread' : ''}`} key={item.id ?? item._id}><span className="notification-indicator" /><div><strong>{item.title}</strong><p>{item.message}</p><time>{new Date(item.createdAt).toLocaleString()}</time></div></div>) : <div className="notification-empty">You’re all caught up.</div>}<div className="email-preference"><label><span>Email updates</span><input type="checkbox" checked={emailNotifications} onChange={(event) => void updateEmailNotifications(event.target.checked)} /></label><small>Invites, changes and one-hour reminders</small></div></div>}</header>
+      <header className="topbar"><button className="icon-button hamburger" aria-label="Open menu" onClick={() => setMobileMenuOpen(true)}><Menu size={20} /></button><div className="breadcrumb">Workspace <span>/</span> <strong>{section === 'overview' ? 'Overview' : section === 'history' ? 'History' : section === 'interviews' ? 'My interviews' : section === 'assistant' ? 'Ask AI' : section[0]!.toUpperCase() + section.slice(1)}</strong></div><div className="topbar-right"><label className="search-box"><Search size={16} /><input placeholder="Search interviews" aria-label="Search interviews" value={search} onChange={(event) => setSearch(event.target.value)} /><kbd>⌘ K</kbd></label><button className="icon-button notification-button" title="Notifications" onClick={() => setNotificationsOpen((open) => !open)}><Bell size={18} />{notifications > 0 && <i />}</button><div className="top-avatar">{initials(user.name)}</div></div>{notificationsOpen && <div className="notification-popover"><div className="popover-heading"><strong>Notifications</strong><button onClick={() => void markNotificationsRead()}>Mark all read</button></div>{notificationItems.length ? notificationItems.map((item) => <div className={`notification-item ${!item.readAt ? 'unread' : ''}`} key={item.id ?? item._id}><span className="notification-indicator" /><div><strong>{item.title}</strong><p>{item.message}</p><time>{new Date(item.createdAt).toLocaleString()}</time></div></div>) : <div className="notification-empty">You’re all caught up.</div>}<div className="email-preference"><label><span>Email updates</span><input type="checkbox" checked={emailNotifications} onChange={(event) => void updateEmailNotifications(event.target.checked)} /></label><small>Invites, changes and one-hour reminders</small></div></div>}</header>
       <div className="content-wrap">
-        <div className="welcome-row"><div><div className="eyebrow"><span className="eyebrow-dot" /> {user.role === 'recruiter' ? 'RECRUITER WORKSPACE' : 'YOUR INTERVIEW SPACE'}</div><h1>{section === 'history' ? 'Past conversations' : section === 'interviews' ? 'Your interviews' : section === 'jobs' ? 'Job opportunities' : section === 'applications' ? 'Application tracker' : section === 'profile' ? 'Your profile' : `Good ${new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 17 ? 'afternoon' : 'evening'}, ${user.name.split(' ')[0]}.`}</h1><p>{section === 'history' ? 'Take a look back at the conversations that moved things forward.' : section === 'jobs' ? 'Manage openings and discover your next opportunity.' : section === 'applications' ? 'Follow each application through its journey.' : section === 'profile' ? 'Keep your professional details up to date.' : 'A little preparation goes a long way. You’ve got this.'}</p></div>{section === 'overview' && user.role !== 'candidate' && <button className="button button-primary" onClick={() => setShowSchedule(true)}><Plus size={17} /> Schedule interview</button>}</div>
+        <div className="welcome-row"><div><div className="eyebrow"><span className="eyebrow-dot" /> {user.role === 'recruiter' ? 'RECRUITER WORKSPACE' : user.role === 'company' ? 'COMPANY WORKSPACE' : 'YOUR INTERVIEW SPACE'}</div><h1>{section === 'history' ? 'Past conversations' : section === 'interviews' ? 'Your interviews' : section === 'jobs' ? 'Job opportunities' : section === 'applications' ? 'Application tracker' : section === 'profile' ? 'Your profile' : section === 'review' ? 'Company review queue' : section === 'practice' ? 'Practice for your next interview' : section === 'assistant' ? 'Ask AI anything' : `Good ${new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 17 ? 'afternoon' : 'evening'}, ${user.name.split(' ')[0]}.`}</h1><p>{section === 'history' ? 'Take a look back at the conversations that moved things forward.' : section === 'jobs' ? 'Manage openings and discover your next opportunity.' : section === 'applications' ? 'Follow each application through its journey.' : section === 'profile' ? 'Keep your professional details up to date.' : section === 'review' ? 'Verify company profiles and approve job postings.' : section === 'practice' ? 'Choose a target job role to see tailored interview questions and practice challenges.' : section === 'assistant' ? 'Ask about interview preparation, careers, learning, or general topics.' : user.role === 'company' ? 'Submit vacancies for recruiter verification and publication.' : 'A little preparation goes a long way. You’ve got this.'}</p></div>{section === 'overview' && user.role !== 'candidate' && user.role !== 'company' && <button className="button button-primary" onClick={() => setShowSchedule(true)}><Plus size={17} /> Schedule interview</button>}</div>
+        {section === 'practice' && user.role === 'candidate' && <MockPractice />}
+        {section === 'assistant' && <AiAssistant token={token} />}
         {section === 'jobs' && <JobsPage token={token} user={user} />}
         {section === 'chats' && <ConversationsPage token={token} user={user} />}
-        {section === 'applications' && user.role !== 'interviewer' && <ApplicationsPage token={token} user={user} />}
+        {section === 'candidates' && user.role === 'recruiter' && <CandidateManagement token={token} />}
+        {section === 'review' && user.role === 'recruiter' && <CompanyReviewQueue token={token} />}
+        {section === 'applications' && (user.role === 'candidate' || user.role === 'recruiter') && <ApplicationsPage token={token} user={user} />}
         {section === 'profile' && <><ProfilePage token={token} user={user} />{user.role === 'candidate' && <ResumeUploadPanel token={token} />}</>}
         {section === 'overview' && user.role === 'recruiter' && <RecruiterDashboard token={token} />}
-        {section === 'overview' && user.role !== 'recruiter' && <section className="stat-grid" aria-label="Interview statistics"><div className="stat-card stat-lilac"><div className="stat-icon"><CalendarDays size={19} /></div><span className="stat-label">UPCOMING</span><strong>{upcoming.length.toString().padStart(2, '0')}</strong><span className="stat-note">on your calendar</span><div className="stat-decoration">✳</div></div><div className="stat-card stat-mint"><div className="stat-icon"><Check size={19} /></div><span className="stat-label">COMPLETED</span><strong>{history.filter((item) => item.status === 'completed').length.toString().padStart(2, '0')}</strong><span className="stat-note">conversations so far</span><div className="stat-decoration">✳</div></div><div className="stat-card stat-peach"><div className="stat-icon"><Clock3 size={19} /></div><span className="stat-label">NEXT SESSION</span><strong className="next-time">{upcoming[0] ? prettyTime(upcoming[0].scheduledAt) : '—'}</strong><span className="stat-note">{upcoming[0] ? prettyDate(upcoming[0].scheduledAt) : 'nothing scheduled yet'}</span><div className="stat-decoration">✳</div></div></section>}
+        {section === 'overview' && user.role === 'candidate' && <section className="role-overview candidate-overview"><div className="role-overview-copy"><div className="eyebrow">CANDIDATE SPACE</div><h2>Build momentum in your job search</h2><p>Keep your profile ready, explore open roles, and stay on top of upcoming interviews.</p><div className="role-overview-actions"><button className="button button-primary" onClick={() => setSection('jobs')}>Explore jobs<ArrowRight size={15} /></button><button className="button button-light" onClick={() => setSection('profile')}>Update profile<UserRound size={15} /></button></div></div><div className="role-overview-stats"><div><span>UPCOMING INTERVIEWS</span><strong>{upcoming.length}</strong></div><div><span>COMPLETED</span><strong>{history.filter((item) => item.status === 'completed').length}</strong></div><div><span>APPLICATIONS</span><button onClick={() => setSection('applications')}>View tracker<ArrowRight size={14} /></button></div></div></section>}
+        {section === 'overview' && user.role === 'interviewer' && <section className="role-overview interviewer-overview"><div className="role-overview-copy"><div className="eyebrow">INTERVIEWER DESK</div><h2>Prepare for your interview sessions</h2><p>Review your schedule, join a room, and complete feedback after each conversation.</p><div className="role-overview-actions"><button className="button button-primary" onClick={() => setSection('interviews')}>Open my schedule<CalendarDays size={15} /></button><button className="button button-light" onClick={() => setSection('history')}>Review completed<FileText size={15} /></button></div></div><div className="role-overview-stats"><div><span>ASSIGNED SESSIONS</span><strong>{upcoming.length}</strong></div><div><span>COMPLETED SESSIONS</span><strong>{history.filter((item) => item.status === 'completed').length}</strong></div><div><span>NEXT SESSION</span><strong className="role-next-session">{upcoming[0] ? prettyTime(upcoming[0].scheduledAt) : '—'}</strong></div></div></section>}
+        {section === 'overview' && user.role === 'company' && <section className="role-overview company-overview"><div className="role-overview-copy"><div className="eyebrow">EMPLOYER WORKSPACE</div><h2>Submit roles for recruiter review</h2><p>Send your company details and vacancies. Recruiters verify the company, then approve each posting before candidates can see it.</p><div className="role-overview-actions"><button className="button button-primary" onClick={() => setSection('jobs')}>Company & vacancies<BriefcaseBusiness size={15} /></button><button className="button button-light" onClick={() => setSection('profile')}>Company profile<UserRound size={15} /></button></div></div><div className="role-overview-stats"><div><span>PUBLIC LISTINGS</span><strong>Recruiter approved</strong></div><div><span>COMPANY REVIEW</span><strong>Manual</strong></div></div></section>}
         {(section === 'overview' || section === 'interviews' || section === 'history') && <section className="interviews-section"><div className="section-heading"><div><div className="eyebrow">{section === 'history' ? 'YOUR JOURNEY' : 'ON THE HORIZON'}</div><h2>{section === 'history' ? 'Interview history' : 'Upcoming interviews'} <span className="heading-count">{visible.length}</span></h2></div><div className="section-actions"><button className="button button-light" onClick={() => visible[0] && void downloadCalendar(visible[0], token)} disabled={!visible.length}><ArrowDownLeft size={16} /> Calendar</button>{user.role !== 'candidate' && <button className="button button-outline" onClick={() => setShowSchedule(true)}><Plus size={16} /> New interview</button>}</div></div>
           {visible.length ? <div className="interview-list">{visible.map((item, index) => <InterviewCard key={item._id} item={item} user={user} onJoin={() => setActiveInterview(item)} onEdit={() => setScheduleInterview(item)} onCancel={() => void cancelInterview(item, token, setInterviews)} onFeedback={() => setFeedbackInterview(item)} onCalendar={() => void downloadCalendar(item, token)} featured={index === 0 && section !== 'history'} />)}</div> : <div className="empty-state"><div className="empty-art"><CalendarDays size={25} /></div><h3>{section === 'history' ? 'Your story starts here' : 'Your calendar is clear'}</h3><p>{section === 'history' ? 'Completed interviews will show up here.' : 'Make room for a great conversation by scheduling an interview.'}</p>{section !== 'history' && user.role === 'interviewer' && <button className="button button-primary" onClick={() => setShowSchedule(true)}><Plus size={16} /> Schedule your first interview</button>}</div>}
         </section>}
@@ -181,9 +194,26 @@ function AuthScreen({ mode, onModeChange, onSuccess, initialMessage = '' }: { mo
   const [error, setError] = useState('');
   const [info, setInfo] = useState(initialMessage);
   const [developmentUrl, setDevelopmentUrl] = useState('');
+  const [developmentCode, setDevelopmentCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [role, setRole] = useState<Role>('candidate');
-  const [email, setEmail] = useState(() => new URLSearchParams(window.location.search).get('email') ?? '');
+  const [email, setEmail] = useState(() => new URLSearchParams(window.location.search).get('email') ?? sessionStorage.getItem('interviewly_verification_email') ?? '');
+  async function resendVerification(openCodeForm = false) {
+    if (!email) { setError('Enter your email address first.'); return; }
+    setBusy(true); setError('');
+    try {
+      const result = await api<{ message: string; developmentCode?: string; developmentMessage?: string }>('/api/auth/resend-verification', undefined, { method: 'POST', body: JSON.stringify({ email }) });
+      setInfo(result.developmentMessage ?? result.message);
+      if (result.developmentCode) setDevelopmentCode(result.developmentCode);
+      setDevelopmentUrl('');
+      if (openCodeForm) {
+        sessionStorage.setItem('interviewly_verification_email', email.toLowerCase());
+        window.history.replaceState({}, '', `${window.location.pathname}?verify=1`);
+        onModeChange('verify');
+      }
+    } catch (err) { setError(err instanceof Error ? err.message : 'Could not resend the verification code.'); }
+    finally { setBusy(false); }
+  }
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError('');
     const data = new FormData(event.currentTarget);
@@ -197,13 +227,36 @@ function AuthScreen({ mode, onModeChange, onSuccess, initialMessage = '' }: { mo
         const result = await api<{ message: string }>('/api/auth/reset-password', undefined, { method: 'POST', body: JSON.stringify({ ...body, token: new URLSearchParams(window.location.search).get('reset') }) });
         setInfo(result.message); onModeChange('login'); window.history.replaceState({}, '', window.location.pathname); return;
       }
+      if (mode === 'verify') {
+        const result = await api<{ message: string }>('/api/auth/verify-email', undefined, { method: 'POST', body: JSON.stringify(body) });
+        setInfo(result.message); setDevelopmentCode(''); setError('');
+        sessionStorage.removeItem('interviewly_verification_email');
+        window.history.replaceState({}, '', window.location.pathname);
+        onModeChange('login'); return;
+      }
       if (mode === 'register') {
-        const result = await api<{ message: string; developmentUrl?: string }>('/api/auth/register', undefined, { method: 'POST', body: JSON.stringify(body) });
-        setInfo(result.message); setDevelopmentUrl(result.developmentUrl ?? ''); setError(''); onModeChange('login'); return;
+        const result = await api<{ message: string; developmentCode?: string }>('/api/auth/register', undefined, { method: 'POST', body: JSON.stringify(body) });
+        const registeredEmail = String(body.email).toLowerCase();
+        setEmail(registeredEmail); sessionStorage.setItem('interviewly_verification_email', registeredEmail);
+        setInfo(result.message); setDevelopmentCode(result.developmentCode ?? ''); setDevelopmentUrl(''); setError('');
+        window.history.replaceState({}, '', `${window.location.pathname}?verify=1`);
+        onModeChange('verify'); return;
       }
       const result = await api<{ token: string; user: User }>('/api/auth/login', undefined, { method: 'POST', body: JSON.stringify(body) });
       onSuccess(result.token, result.user);
-    } catch (err) { setError(err instanceof Error ? err.message : 'Could not sign in.'); }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Could not sign in.';
+      if (mode === 'login' && message.toLowerCase().includes('verify your email')) {
+        const loginEmail = String(body.email ?? '').trim().toLowerCase();
+        setEmail(loginEmail);
+        sessionStorage.setItem('interviewly_verification_email', loginEmail);
+        window.history.replaceState({}, '', `${window.location.pathname}?verify=1`);
+        onModeChange('verify');
+        await resendVerification(false);
+      } else {
+        setError(message);
+      }
+    }
     finally { setBusy(false); }
   }
   return <div className="auth-layout">
@@ -230,20 +283,21 @@ function AuthScreen({ mode, onModeChange, onSuccess, initialMessage = '' }: { mo
     </section>
     <section className="auth-panel">
       <form className="auth-form" onSubmit={submit}>
-        <div className="form-kicker">{mode === 'login' ? 'WELCOME BACK' : mode === 'register' ? 'WELCOME ABOARD' : mode === 'forgot' ? 'ACCOUNT RECOVERY' : 'CHOOSE A NEW PASSWORD'} <span>✳</span></div>
-        <h2>{mode === 'login' ? 'Let’s pick up where you left off.' : mode === 'register' ? 'Your next great conversation starts here.' : mode === 'forgot' ? 'Let’s get you back in.' : 'Set a new password.'}</h2>
-        <p className="auth-subtitle">{mode === 'login' ? 'Sign in to your Interviewly workspace.' : mode === 'register' ? 'Create your account to get started.' : mode === 'forgot' ? 'We’ll email a secure password reset link if an account matches.' : 'Use at least 8 characters for your new password.'}</p>
+        <div className="form-kicker">{mode === 'login' ? 'WELCOME BACK' : mode === 'register' ? 'WELCOME ABOARD' : mode === 'verify' ? 'EMAIL VERIFICATION' : mode === 'forgot' ? 'ACCOUNT RECOVERY' : 'CHOOSE A NEW PASSWORD'} <span>✳</span></div>
+        <h2>{mode === 'login' ? 'Let’s pick up where you left off.' : mode === 'register' ? 'Your next great conversation starts here.' : mode === 'verify' ? 'Check your inbox for a code.' : mode === 'forgot' ? 'Let’s get you back in.' : 'Set a new password.'}</h2>
+        <p className="auth-subtitle">{mode === 'login' ? 'Sign in to your Interviewly workspace.' : mode === 'register' ? 'Create your account to get started.' : mode === 'verify' ? 'Enter the 6-digit code we sent to your email. It expires in 10 minutes.' : mode === 'forgot' ? 'We’ll email a secure password reset link if an account matches.' : 'Use at least 8 characters for your new password.'}</p>
       {mode === 'register' && <label className="field-label">Full name<input name="name" required minLength={2} placeholder="Alex Morgan" autoComplete="name" /></label>}
       {mode !== 'reset' && <label className="field-label">Email address<input name="email" type="email" required placeholder="you@company.com" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>}
       {mode === 'login' && <label className="field-label">Password<input name="password" type="password" required placeholder="Enter your password" autoComplete="current-password" /></label>}
       {mode === 'register' && <label className="field-label">Password<input name="password" type="password" required minLength={8} placeholder="At least 8 characters" autoComplete="new-password" /></label>}
+      {mode === 'verify' && <label className="field-label">6-digit code<input name="code" type="text" required inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" minLength={6} maxLength={6} placeholder="123456" /></label>}
       {mode === 'reset' && <label className="field-label">New password<input name="password" type="password" required minLength={8} placeholder="At least 8 characters" autoComplete="new-password" /></label>}
-      {mode === 'register' && <><label className="field-label">I’m joining as<select name="role" value={role} onChange={(event) => setRole(event.target.value as Role)}><option value="candidate">Candidate</option><option value="interviewer">Interviewer</option><option value="recruiter">Recruiter / Admin</option></select></label>{(role === 'interviewer' || role === 'recruiter') && <label className="field-label">Organization invitation code<input name="interviewerCode" placeholder="Required in production" autoComplete="off" /></label>}</>}
-      {info && <div className="form-info">{info}{developmentUrl && <a className="development-link" href={developmentUrl}>{mode === 'forgot' ? 'Continue password reset' : 'Verify email address'}</a>}</div>}{error && <div className="form-error">{error}</div>}
+      {mode === 'register' && <><label className="field-label">I’m joining as<select name="role" value={role} onChange={(event) => setRole(event.target.value as Role)}><option value="candidate">Candidate</option><option value="interviewer">Interviewer</option><option value="recruiter">Recruiter / Admin</option><option value="company">Company</option></select></label>{(role === 'interviewer' || role === 'recruiter') && <label className="field-label">Organization invitation code<input name="interviewerCode" placeholder="Required in production" autoComplete="off" /></label>}</>}
+      {info && <div className="form-info">{info}{developmentCode && <strong className="development-code">Local development code: {developmentCode}</strong>}{developmentUrl && <a className="development-link" href={developmentUrl}>{mode === 'forgot' ? 'Continue password reset' : 'Continue'}</a>}</div>}{error && <div className="form-error">{error}</div>}
       {mode === 'login' && <button type="button" className="forgot-link" onClick={() => { setInfo(''); setError(''); setDevelopmentUrl(''); onModeChange('forgot'); }}>Forgot password?</button>}
-      {mode === 'login' && <button type="button" className="forgot-link" onClick={() => { if (!email) { setError('Enter your email address first.'); return; } void api<{ message: string; developmentUrl?: string }>('/api/auth/resend-verification', undefined, { method: 'POST', body: JSON.stringify({ email }) }).then((result) => { setInfo(result.message); setDevelopmentUrl(result.developmentUrl ?? ''); setError(''); }).catch((err: unknown) => setError(err instanceof Error ? err.message : 'Could not resend the link.')); }}>Didn’t get the verification email? Resend it</button>}
-      <button className="button button-primary auth-submit" disabled={busy}>{busy ? 'One moment…' : mode === 'login' ? 'Sign in to workspace' : mode === 'register' ? 'Create my account' : mode === 'forgot' ? 'Send reset link' : 'Update password'}<ArrowRight size={17} /></button>
-      <div className="auth-switch">{mode === 'register' ? 'Already have an account?' : mode === 'login' ? 'New to Interviewly?' : 'Remembered your password?'} <button type="button" onClick={() => { setError(''); setInfo(''); onModeChange(mode === 'login' ? 'register' : 'login'); }}>{mode === 'login' ? 'Create an account' : mode === 'register' ? 'Sign in' : 'Back to sign in'}</button></div><div className="secure-note"><ShieldCheck size={15} /> Your information is always private</div>
+      {(mode === 'login' || mode === 'verify' || mode === 'forgot') && <button type="button" className="forgot-link" disabled={busy} onClick={() => void resendVerification(mode !== 'verify')}>{mode === 'verify' ? 'Resend verification code' : mode === 'forgot' ? 'Need an email verification code instead?' : 'Didn’t get the verification code?'}</button>}
+      <button className="button button-primary auth-submit" disabled={busy}>{busy ? 'One moment…' : mode === 'login' ? 'Sign in to workspace' : mode === 'register' ? 'Create my account' : mode === 'verify' ? 'Verify email' : mode === 'forgot' ? 'Send reset link' : 'Update password'}<ArrowRight size={17} /></button>
+      <div className="auth-switch">{mode === 'register' ? 'Already have an account?' : mode === 'login' ? 'New to Interviewly?' : mode === 'verify' ? 'Already verified?' : 'Remembered your password?'} <button type="button" onClick={() => { setError(''); setInfo(''); setDevelopmentCode(''); setDevelopmentUrl(''); if (mode === 'verify') { window.history.replaceState({}, '', window.location.pathname); } onModeChange(mode === 'login' ? 'register' : 'login'); }}>{mode === 'login' ? 'Create an account' : mode === 'register' ? 'Sign in' : 'Back to sign in'}</button></div><div className="secure-note"><ShieldCheck size={15} /> Your information is always private</div>
       </form>
     </section>
   </div>;
@@ -303,6 +357,7 @@ function CallRoom({ interview, token, user, onClose, onStatusChange }: { intervi
   const [cameraOn, setCameraOn] = useState(true);
   const [mediaError, setMediaError] = useState('');
   const [connected, setConnected] = useState(false);
+  const [peerState, setPeerState] = useState<RTCPeerConnectionState>('new');
   const [chatOpen, setChatOpen] = useState(true);
   const [copied, setCopied] = useState(false);
   const [sharingScreen, setSharingScreen] = useState(false);
@@ -331,9 +386,15 @@ function CallRoom({ interview, token, user, onClose, onStatusChange }: { intervi
     peer.ontrack = (event) => { if (remoteVideo.current) remoteVideo.current.srcObject = event.streams[0]; setConnected(true); };
     peer.onicecandidate = (event) => { if (event.candidate) socket.emit('webrtc:ice', { roomCode: interview.roomCode, payload: event.candidate.toJSON() }); };
     peer.onconnectionstatechange = () => {
+      setPeerState(peer.connectionState);
       setConnected(peer.connectionState === 'connected');
       if (peer.connectionState === 'failed') {
-        try { peer.restartIce(); }
+        try {
+          peer.restartIce();
+          void peer.createOffer({ iceRestart: true }).then((offer) => peer.setLocalDescription(offer)).then(() => {
+            if (peer.localDescription) socket.emit('webrtc:offer', { roomCode: interview.roomCode, payload: peer.localDescription.toJSON() });
+          }).catch(() => setConnectionQuality('poor'));
+        }
         catch { setConnectionQuality('poor'); }
       }
     };
@@ -482,8 +543,7 @@ function CallRoom({ interview, token, user, onClose, onStatusChange }: { intervi
     try { await remote.setSinkId(deviceId); setSelectedSpeaker(deviceId); }
     catch { setMediaError('Could not switch speaker output.'); }
   };
-  const togglePictureInPicture = async () => {
-    const video = remoteVideo.current;
+  const togglePictureInPicture = async (video: HTMLVideoElement | null = remoteVideo.current) => {
     if (!video) return;
     try { if (document.pictureInPictureElement) await document.exitPictureInPicture(); else await video.requestPictureInPicture(); }
     catch { setMediaError('Picture-in-picture is not supported by this browser.'); }
@@ -566,7 +626,7 @@ function CallRoom({ interview, token, user, onClose, onStatusChange }: { intervi
       {mediaError && <div className="media-warning">{mediaError}</div>}
       {chatError && <div className="media-warning">{chatError}</div>}
       <div className="video-grid" ref={videoGrid}><div className="video-tile remote-tile"><video ref={remoteVideo} autoPlay playsInline /><div className="video-empty"><div className="avatar avatar-large">{initials(otherName)}</div><strong>{otherName}</strong><span>{connected ? 'Connecting video…' : 'They’ll appear when they join'}</span></div><div className="video-name-tag"><span className={`presence-dot ${online ? 'online' : ''}`} />{otherName}{!online && <small> · offline</small>}</div><div className="video-status"><span className="sound-bars"><i /><i /><i /><i /></span></div></div><div className="video-tile self-tile"><video ref={localVideo} autoPlay muted playsInline /><div className="video-empty"><div className="avatar avatar-large">{initials(user.name)}</div><strong>{user.name} (you)</strong><span>Camera preview</span></div><div className="video-name-tag">{sharingScreen ? 'Your screen' : `${user.name} (you)`}</div>{!micOn && <div className="muted-badge"><MicOff size={13} /> Muted</div>}</div></div>
-      <div className="call-controls"><div className="control-left"><span className="encrypted-note"><ShieldCheck size={14} /> Participant-only room</span></div><div className="control-center"><button onClick={toggleMic} className={`control-button ${!micOn ? 'control-off' : ''}`} aria-label={micOn ? 'Mute microphone' : 'Unmute microphone'}>{micOn ? <Mic size={19} /> : <MicOff size={19} />}<span>{micOn ? 'Mute' : 'Unmute'}</span></button><button onClick={toggleCamera} className={`control-button ${!cameraOn ? 'control-off' : ''}`} aria-label={cameraOn ? 'Turn camera off' : 'Turn camera on'}>{cameraOn ? <Video size={19} /> : <VideoOff size={19} />}<span>{cameraOn ? 'Camera' : 'Camera off'}</span></button><button className={`control-button ${sharingScreen ? 'control-active' : ''}`} onClick={() => void toggleScreenShare()} aria-label={sharingScreen ? 'Stop sharing screen' : 'Share screen'}><ScreenShare size={19} /><span>{sharingScreen ? 'Stop share' : 'Share screen'}</span></button><button className={`control-button ${chatOpen ? 'control-active' : ''}`} onClick={() => setChatOpen((open) => !open)} aria-label="Toggle chat"><MessageCircle size={19} />{unreadChat > 0 && <i className="chat-unread-dot" /> }<span>Chat</span></button><button className="control-button" onClick={togglePictureInPicture} title="Picture in picture"><Maximize2 size={19} /><span>PiP</span></button><button className="control-button" onClick={toggleFullscreen} title="Toggle video fullscreen"><Maximize2 size={19} /><span>Fullscreen</span></button><button className="control-button" onClick={() => setShowSettings((shown) => !shown)} title="Call settings"><Settings2 size={19} /><span>Devices</span></button>{peerRef.current?.connectionState === 'failed' && <button className="control-button control-off" onClick={() => void toggleReconnect()} title="Reconnect call">Reconnect</button>}</div><div className="control-right"><button className="button button-end" onClick={() => { onStatusChange(interview._id, 'completed'); onClose(); }}><span>✕</span> Leave</button></div></div>
+      <div className="call-controls"><div className="control-left"><span className="encrypted-note"><ShieldCheck size={14} /> Participant-only room</span></div><div className="control-center"><button onClick={toggleMic} className={`control-button ${!micOn ? 'control-off' : ''}`} aria-label={micOn ? 'Mute microphone' : 'Unmute microphone'}>{micOn ? <Mic size={19} /> : <MicOff size={19} />}<span>{micOn ? 'Mute' : 'Unmute'}</span></button><button onClick={toggleCamera} className={`control-button ${!cameraOn ? 'control-off' : ''}`} aria-label={cameraOn ? 'Turn camera off' : 'Turn camera on'}>{cameraOn ? <Video size={19} /> : <VideoOff size={19} />}<span>{cameraOn ? 'Camera' : 'Camera off'}</span></button><button className={`control-button ${sharingScreen ? 'control-active' : ''}`} onClick={() => void toggleScreenShare()} aria-label={sharingScreen ? 'Stop sharing screen' : 'Share screen'}><ScreenShare size={19} /><span>{sharingScreen ? 'Stop share' : 'Share screen'}</span></button><button className={`control-button ${chatOpen ? 'control-active' : ''}`} onClick={() => setChatOpen((open) => !open)} aria-label="Toggle chat"><MessageCircle size={19} />{unreadChat > 0 && <i className="chat-unread-dot" /> }<span>Chat</span></button><button className="control-button" onClick={() => void togglePictureInPicture()} title="Picture in picture"><Maximize2 size={19} /><span>PiP</span></button><button className="control-button" onClick={toggleFullscreen} title="Toggle video fullscreen"><Maximize2 size={19} /><span>Fullscreen</span></button><button className="control-button" onClick={() => setShowSettings((shown) => !shown)} title="Call settings"><Settings2 size={19} /><span>Devices</span></button>{peerState === 'failed' && <button className="control-button control-off" onClick={() => void toggleReconnect()} title="Reconnect call">Reconnect</button>}</div><div className="control-right"><button className="button button-end" onClick={() => { onStatusChange(interview._id, 'completed'); onClose(); }}><span>✕</span> Leave</button></div></div>
       {showSettings && <div className="device-settings"><label>Camera<select value={selectedCamera} onChange={(event) => void changeDevice('video', event.target.value)}>{cameraDevices.map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Camera ${index + 1}`}</option>)}</select></label><label>Microphone<select value={selectedAudio} onChange={(event) => void changeDevice('audio', event.target.value)}>{audioDevices.map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Microphone ${index + 1}`}</option>)}</select></label>{speakerDevices.length > 0 && <label>Speaker<select value={selectedSpeaker} onChange={(event) => void changeSpeaker(event.target.value)}>{speakerDevices.map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Speaker ${index + 1}`}</option>)}</select></label>}<button className="button button-light" onClick={toggleRecordingConsent}>{recordingConsent ? 'Withdraw recording consent' : 'Consent to local recording'}</button>{recordingAllowed && <button className="button button-primary" onClick={recording ? stopLocalRecording : () => void startLocalRecording()}>{recording ? 'Stop & download recording' : 'Start local recording'}</button>}<span className="recording-note">Both participants must consent. The recording is saved only on this device.</span></div>}
       <canvas ref={recordingCanvas} className="recording-canvas" aria-hidden="true" />
       <div className="room-tip"><input ref={attachmentInput} type="file" hidden accept="image/jpeg,image/png,image/gif,image/webp,application/pdf,text/plain" onChange={(event) => { void sendAttachment(event.target.files?.[0]); event.target.value = ''; }} /><button className="call-attach" onClick={() => attachmentInput.current?.click()} title="Attach image, PDF or text file"><Paperclip size={14} /> Attach</button><button className="call-attach" onClick={() => setShowCode((shown) => !shown)}><Code2 size={14} /> {showCode ? 'Hide code' : 'Code round'}</button><Sparkles size={15} /><span>Take a breath. You’re in the right place.</span><span className="tip-dot">✳</span></div>
