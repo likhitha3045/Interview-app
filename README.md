@@ -15,7 +15,7 @@ A responsive interview workspace built with React, TypeScript, Express, Socket.I
 4. Run `npm run dev` at the project root. The UI runs at `http://localhost:5173`; the API and Socket.IO server run at `http://localhost:4000`.
 5. Create and verify a company account, recruiter account, interviewer account, and candidate account. A company submits its profile and domain-matching company email, then submits vacancies. A recruiter manually reviews/verifies the company, then separately approves each vacancy to publish it. Only approved, open listings appear to candidates. In production, recruiter and interviewer signup require their matching `RECRUITER_SIGNUP_CODE` or `INTERVIEWER_SIGNUP_CODE`. After a candidate applies, the recruiter can schedule an interview and assign a verified interviewer. New accounts verify their email by entering a one-time 6-digit code sent to that address. The code expires after 10 minutes and allows up to five attempts. With SMTP unconfigured locally, the code is shown in the UI for development only. Pending interview invitations attach automatically when the invited candidate email is verified.
 
-For actual email delivery, configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, and `SMTP_FROM`. Production startup requires SMTP and interviewer/recruiter signup codes. Set `CLIENT_ORIGIN` to the frontend origin. `API_PUBLIC_URL` is used for other email links such as password resets and invitations. Interview invitation/update/cancellation and one-hour reminder emails follow the user’s email preference. In-app notifications are stored in MongoDB and remain available while a user is offline. Without SMTP in development, the registration response shows the verification code in the UI and the API terminal logs email activity; password recovery shows a local reset link. No email is delivered until SMTP is configured.
+For actual email delivery, configure `MAILJET_API_KEY`, `MAILJET_SECRET_KEY`, and `SMTP_FROM` using Mailjet's HTTPS Send API. Production startup also requires interviewer/recruiter signup codes. Set `CLIENT_ORIGIN` to the frontend origin. `API_PUBLIC_URL` is used for other email links such as password resets and invitations. Interview invitation/update/cancellation and one-hour reminder emails follow the user’s email preference. In-app notifications are stored in MongoDB and remain available while a user is offline. Without Mailjet credentials in development, the registration response shows the verification code in the UI and the API terminal logs email activity; password recovery shows a local reset link. No email is delivered until Mailjet is configured.
 
 ## Development checks
 
@@ -23,20 +23,17 @@ For actual email delivery, configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `S
 - `npm run build` builds the server and web app.
 - `npm test` runs the server's automated unit tests.
 
-### Resend SMTP example
+### Mailjet email example
 
-Create a Resend account, verify a sending domain (recommended for real recipients), and create an API key. Put these settings in the **untracked** `apps/server/.env` file; never commit the API key:
+Create a Mailjet account and verify a sender address. Add these settings to the **untracked** `apps/server/.env` file and to your Render server environment variables. Never commit or share the keys:
 
 ```dotenv
-SMTP_HOST=smtp.resend.com
-SMTP_PORT=465
-SMTP_SECURE=true
-SMTP_USER=resend
-SMTP_PASS=your-resend-api-key
-SMTP_FROM=Interviewly <no-reply@your-verified-domain.example>
+MAILJET_API_KEY=your-mailjet-api-key
+MAILJET_SECRET_KEY=your-mailjet-secret-key
+SMTP_FROM=Interviewly <your-verified-sender@example.com>
 ```
 
-Replace the sender address with an address on the domain verified with your mail provider. Restart the API after editing the environment file. The provider must allow delivery to the recipients you want to verify; some providers restrict unverified accounts to a test recipient list. Keep the API key private and never place it in the web app's environment file.
+Use the API Key as `MAILJET_API_KEY` and the Secret Key as `MAILJET_SECRET_KEY`. `SMTP_FROM` keeps its historical name in this app but is only the sender name/address; the app sends through Mailjet's HTTPS API, not SMTP. Keep both keys private and never place them in the web app's environment file.
 
 The browser must grant camera/microphone access for audio/video. Localhost is treated as a secure context by browsers; deployed clients need HTTPS. The API returns signed, one-hour TURN credentials when `TURN_URLS` and `TURN_SHARED_SECRET` are configured (compatible with coturn shared-secret authentication); otherwise calls use the configured `STUN_URLS` fallback and may fail on restrictive networks. Select a hosted TURN service that supports coturn's time-limited shared-secret REST authentication, then set its TURN URLs and shared secret on the API server. Some hosted TURN products issue credentials through their own API instead; those require a provider-specific adapter and are not interchangeable with this shared-secret setting. Never put a TURN shared secret in frontend environment variables.
 
@@ -71,4 +68,4 @@ Résumé type checks verify the declared MIME type and basic file contents. They
 
 ## Deployment notes
 
-Deploy the web and server workspaces separately or from the monorepo. Set server `MONGODB_URI`, a strong `JWT_SECRET`, `INTERVIEWER_SIGNUP_CODE`, `RECRUITER_SIGNUP_CODE`, SMTP settings, `API_PUBLIC_URL`, `CLIENT_ORIGIN` to the deployed frontend origin, and `PORT` as provided by the platform. Set frontend `VITE_API_URL` to the deployed API origin. Configure HTTPS and a TURN service with a shared secret for production-grade WebRTC connectivity; never commit environment files or production secrets. Add a managed MongoDB backup policy and production error monitoring before onboarding users. Calls are peer-to-peer and are not uploaded/archived by Interviewly. Local recording is browser-only and consent-gated. The shared Monaco editor syncs code; execution is only enabled when `JUDGE0_API_URL` points to an isolated Judge0-compatible sandbox. File bytes are stored in MongoDB for this prototype; production should migrate to private object storage, malware scanning and retention controls.
+Deploy the web and server workspaces separately or from the monorepo. Set server `MONGODB_URI`, a strong `JWT_SECRET`, `INTERVIEWER_SIGNUP_CODE`, `RECRUITER_SIGNUP_CODE`, `MAILJET_API_KEY`, `MAILJET_SECRET_KEY`, `SMTP_FROM`, `API_PUBLIC_URL`, and `CLIENT_ORIGIN` to the deployed frontend origin. Set frontend `VITE_API_URL` to the deployed API origin. Configure HTTPS and a TURN service with a shared secret for production-grade WebRTC connectivity; never commit environment files or production secrets. Add a managed MongoDB backup policy and production error monitoring before onboarding users. Calls are peer-to-peer and are not uploaded/archived by Interviewly. Local recording is browser-only and consent-gated. The shared Monaco editor syncs code; execution is only enabled when `JUDGE0_API_URL` points to an isolated Judge0-compatible sandbox. File bytes are stored in MongoDB for this prototype; production should migrate to private object storage, malware scanning and retention controls.

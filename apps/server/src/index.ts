@@ -21,7 +21,7 @@ const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) throw new Error('JWT_SECRET must be set in the environment.');
 if (process.env.NODE_ENV === 'production' && !process.env.INTERVIEWER_SIGNUP_CODE) throw new Error('INTERVIEWER_SIGNUP_CODE must be set in production.');
 if (process.env.NODE_ENV === 'production' && !process.env.RECRUITER_SIGNUP_CODE) throw new Error('RECRUITER_SIGNUP_CODE must be set in production.');
-if (process.env.NODE_ENV === 'production' && !process.env.SMTP_HOST) throw new Error('SMTP_HOST must be configured in production for account verification and interview email.');
+if (process.env.NODE_ENV === 'production' && (!process.env.MAILJET_API_KEY || !process.env.MAILJET_SECRET_KEY)) throw new Error('MAILJET_API_KEY and MAILJET_SECRET_KEY must be configured in production for account verification and interview email.');
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN ?? 'http://localhost:5173';
 
 const app = express();
@@ -125,7 +125,7 @@ app.post('/api/auth/register', verificationRateLimit, asyncRoute(async (req, res
   const user = await User.create({ name: input.data.name, email, role: input.data.role, passwordHash: await bcrypt.hash(input.data.password, 12) });
   const verificationCode = await issueVerificationCode(String(user._id));
   const emailDelivered = await sendEmail(user.email, 'Your Interviewly verification code', `Your email verification code is ${verificationCode}. It expires in 10 minutes.`);
-  res.status(201).json({ message: emailDelivered ? 'Account created. Enter the verification code sent to your email.' : 'SMTP is not configured, so no email was sent. Use the local verification code below.', ...(!emailDelivered && !isEmailConfigured() ? { developmentCode: verificationCode } : {}) });
+  res.status(201).json({ message: emailDelivered ? 'Account created. Enter the verification code sent to your email.' : 'Email delivery is not configured, so no email was sent. Use the local verification code below.', ...(!emailDelivered && !isEmailConfigured() ? { developmentCode: verificationCode } : {}) });
 }));
 
 app.post('/api/auth/login', asyncRoute(async (req, res) => {
@@ -181,7 +181,7 @@ app.post('/api/auth/resend-verification', verificationRateLimit, asyncRoute(asyn
       }
     }
   }
-  res.json({ message: 'If the account needs verification, a code has been sent. Wait one minute before requesting another code.', ...(developmentCode ? { developmentCode, developmentMessage: 'SMTP is not configured; this code is for local development only.' } : {}) });
+  res.json({ message: 'If the account needs verification, a code has been sent. Wait one minute before requesting another code.', ...(developmentCode ? { developmentCode, developmentMessage: 'Email delivery is not configured; this code is for local development only.' } : {}) });
 }));
 
 app.post('/api/auth/forgot-password', asyncRoute(async (req, res) => {
@@ -192,7 +192,7 @@ app.post('/api/auth/forgot-password', asyncRoute(async (req, res) => {
     const token = await issueOneTimeToken(String(user._id), 'reset-password');
     const resetUrl = clientUrl(`/?reset=${token}`);
     const emailDelivered = await sendEmail(user.email, 'Reset your Interviewly password', 'Use the link below to choose a new password. This link expires in one hour.', resetUrl);
-    if (!emailDelivered && !isEmailConfigured() && process.env.NODE_ENV !== 'production') return res.json({ message: 'SMTP is not configured, so no email was sent. Use the local password-reset link below.', developmentUrl: resetUrl });
+    if (!emailDelivered && !isEmailConfigured() && process.env.NODE_ENV !== 'production') return res.json({ message: 'Email delivery is not configured, so no email was sent. Use the local password-reset link below.', developmentUrl: resetUrl });
   }
   res.json({ message: 'If that account exists, a password reset link will be sent.' });
 }));
