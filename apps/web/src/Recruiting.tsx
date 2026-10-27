@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { ArrowRight, BriefcaseBusiness, Check, Plus, Sparkles, UserRound, Users, X } from 'lucide-react';
+import { ArrowRight, BriefcaseBusiness, Check, Plus, UserRound, Users, X } from 'lucide-react';
 import { CompanySubmissionPortal } from './CompanyWorkflow';
 export { CompanyReviewQueue } from './CompanyWorkflow';
 
@@ -98,26 +98,9 @@ export function ProfilePage({ token, user }: { token: string; user: User }) {
 
 export function RecruiterDashboard({ token }: { token: string }) {
   const [metrics, setMetrics] = useState<Metrics | null>(null);
-  const [aiOpen, setAiOpen] = useState(false);
   useEffect(() => { void request<Metrics>('/api/recruiter/metrics', token).then(setMetrics).catch(() => undefined); }, [token]);
   if (!metrics) return <section className="stat-grid" aria-label="Recruiter statistics"><div className="stat-card stat-lilac"><div className="stat-icon"><Users size={19} /></div><span className="stat-label">CANDIDATES</span><strong>—</strong><span className="stat-note">in the talent pool</span></div><div className="stat-card stat-mint"><div className="stat-icon"><Check size={19} /></div><span className="stat-label">APPLICATIONS</span><strong>—</strong><span className="stat-note">across your job posts</span></div><div className="stat-card stat-peach"><div className="stat-icon"><BriefcaseBusiness size={19} /></div><span className="stat-label">INTERVIEWS TODAY</span><strong>—</strong><span className="stat-note">scheduled sessions</span></div></section>;
-  return <><section className="stat-grid" aria-label="Recruiter statistics"><div className="stat-card stat-lilac"><div className="stat-icon"><Users size={19} /></div><span className="stat-label">CANDIDATES</span><strong>{metrics.totalCandidates}</strong><span className="stat-note">in the talent pool</span></div><div className="stat-card stat-mint"><div className="stat-icon"><Check size={19} /></div><span className="stat-label">APPLICATIONS</span><strong>{metrics.applications}</strong><span className="stat-note">{metrics.shortlisted} shortlisted · {metrics.selected} selected</span></div><div className="stat-card stat-peach"><div className="stat-icon"><BriefcaseBusiness size={19} /></div><span className="stat-label">INTERVIEWS TODAY</span><strong>{metrics.interviewsToday}</strong><span className="stat-note">scheduled sessions</span></div></section><section className="recruiter-jobs"><div className="eyebrow">YOUR PIPELINE</div><h2>Applications by role</h2>{metrics.jobCounts.length ? metrics.jobCounts.map((item) => <div className="metric-bar" key={item.title}><span>{item.title}</span><b>{item.count}</b><i style={{ width: `${Math.max(8, item.count / Math.max(...metrics.jobCounts.map((job) => job.count), 1) * 100)}%` }} /></div>) : <p className="job-company">Publish a role to start building your candidate pipeline.</p>}</section><section className="recruiter-jobs"><div className="eyebrow">OPTIONAL AI ASSISTANT</div><h2>Interview question starter</h2><p className="job-company">Generate a draft list of role-specific questions when an AI provider is configured.</p><button className="button button-light" onClick={() => setAiOpen(true)}>Generate questions</button></section>{aiOpen && <QuestionGenerator token={token} onClose={() => setAiOpen(false)} />}</>;
-}
-
-function QuestionGenerator({ token, onClose }: { token: string; onClose: () => void }) {
-  const [role, setRole] = useState('Frontend Developer');
-  const [experience, setExperience] = useState('Junior');
-  const [skills, setSkills] = useState('React, JavaScript, CSS');
-  const [questions, setQuestions] = useState('');
-  const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
-  async function generate(event: FormEvent) {
-    event.preventDefault(); setBusy(true); setError('');
-    try { const result = await request<{ questions: string }>('/api/ai/interview-questions', token, { method: 'POST', body: JSON.stringify({ role, experience, skills: skills.split(',').map((item) => item.trim()).filter(Boolean) }) }); setQuestions(result.questions); }
-    catch (err) { setError(err instanceof Error ? err.message : 'Question generation is unavailable.'); }
-    finally { setBusy(false); }
-  }
-  return <div className="modal-backdrop"><div className="modal-card"><div className="modal-top"><div className="modal-icon"><Sparkles size={20} /></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={18} /></button></div><div className="eyebrow">OPTIONAL AI ASSISTANT</div><h2>Generate interview questions</h2><form onSubmit={generate}><label className="field-label">Role<input value={role} onChange={(event) => setRole(event.target.value)} required /></label><label className="field-label">Experience<input value={experience} onChange={(event) => setExperience(event.target.value)} /></label><label className="field-label">Skills, comma-separated<input value={skills} onChange={(event) => setSkills(event.target.value)} required /></label><button className="button button-primary" disabled={busy}>{busy ? 'Generating…' : 'Generate questions'}<ArrowRight size={15} /></button></form>{error && <div className="form-error">{error}</div>}{questions && <pre className="ai-question-results">{questions}</pre>}</div></div>;
+  return <><section className="stat-grid" aria-label="Recruiter statistics"><div className="stat-card stat-lilac"><div className="stat-icon"><Users size={19} /></div><span className="stat-label">CANDIDATES</span><strong>{metrics.totalCandidates}</strong><span className="stat-note">in the talent pool</span></div><div className="stat-card stat-mint"><div className="stat-icon"><Check size={19} /></div><span className="stat-label">APPLICATIONS</span><strong>{metrics.applications}</strong><span className="stat-note">{metrics.shortlisted} shortlisted · {metrics.selected} selected</span></div><div className="stat-card stat-peach"><div className="stat-icon"><BriefcaseBusiness size={19} /></div><span className="stat-label">INTERVIEWS TODAY</span><strong>{metrics.interviewsToday}</strong><span className="stat-note">scheduled sessions</span></div></section><section className="recruiter-jobs"><div className="eyebrow">YOUR PIPELINE</div><h2>Applications by role</h2>{metrics.jobCounts.length ? metrics.jobCounts.map((item) => <div className="metric-bar" key={item.title}><span>{item.title}</span><b>{item.count}</b><i style={{ width: `${Math.max(8, item.count / Math.max(...metrics.jobCounts.map((job) => job.count), 1) * 100)}%` }} /></div>) : <p className="job-company">Publish a role to start building your candidate pipeline.</p>}</section></>;
 }
 
 export function EvaluationModal({ interview, token, onClose }: { interview: { _id: string; title: string }; token: string; onClose: () => void }) {

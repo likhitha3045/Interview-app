@@ -32,7 +32,6 @@ app.use(helmet());
 app.use(express.json({ limit: '32kb' }));
 app.use('/api/auth', rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false }));
 const verificationRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: 'draft-8', legacyHeaders: false, message: { message: 'Too many verification attempts. Please wait before trying again.' } });
-const aiAssistantRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false, message: { message: 'You have reached the AI assistant limit. Please try again later.' } });
 app.use('/api', rateLimit({ windowMs: 60 * 1000, limit: 180, standardHeaders: 'draft-8', legacyHeaders: false, skip: (req) => req.path === '/health' }));
 const attachmentUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 }, fileFilter: (_req, file, callback) => {
   const safeMimeTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'application/pdf', 'text/plain'];
@@ -491,53 +490,6 @@ app.patch('/api/recruiter/users/:id/status', authenticate, asyncRoute(async (req
   if (!candidate) return res.status(404).json({ message: 'Candidate not found.' });
   if (!input.data.active) for (const socketId of onlineSockets.get(String(candidate._id)) ?? []) io.sockets.sockets.get(socketId)?.disconnect(true);
   res.json({ id: String(candidate._id), name: candidate.name, email: candidate.email, isActive: candidate.isActive });
-}));
-
-app.post('/api/ai/interview-questions', authenticate, asyncRoute(async (req, res) => {
-  const currentUser = res.locals.user as TokenPayload;
-  if (!['recruiter', 'interviewer'].includes(currentUser.role)) return res.status(403).json({ message: 'Recruiter or interviewer access is required.' });
-  const input = z.object({ role: z.string().trim().min(2).max(100), experience: z.string().trim().max(80).default(''), skills: z.array(z.string().trim().min(1).max(50)).max(20) }).safeParse(req.body);
-  if (!input.success) return res.status(400).json({ message: 'Add a role and at least one skill.' });
-  const key = process.env.AI_API_KEY;
-  if (!key) return res.status(503).json({ message: 'AI question generation is optional. Configure AI_API_KEY and AI_API_URL to enable it.' });
-  const endpoint = process.env.AI_API_URL ?? 'https://api.openai.com/v1/chat/completions';
-  const response = await fetch(endpoint, { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: process.env.AI_MODEL ?? 'gpt-4o-mini', temperature: 0.4, max_tokens: 800, messages: [{ role: 'system', content: 'Create 6 concise, original interview questions. Return a numbered list. Do not assess or infer protected characteristics.' }, { role: 'user', content: `Role: ${input.data.role}\nExperience: ${input.data.experience}\nSkills: ${input.data.skills.join(', ')}` }] }), signal: AbortSignal.timeout(20_000) });
-  if (!response.ok) return res.status(502).json({ message: 'The configured AI provider could not generate questions.' });
-  const result = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-  const questions = result.choices?.[0]?.message?.content?.trim();
-  if (!questions) return res.status(502).json({ message: 'The AI provider returned no questions.' });
-  res.json({ questions });
-}));
-
-app.post('/api/ai/chat', authenticate, aiAssistantRateLimit, asyncRoute(async (req, res) => {
-  const input = z.object({
-    messages: z.array(z.object({ role: z.enum(['user', 'assistant']), content: z.string().trim().min(1).max(3000) })).min(1).max(12),
-  }).safeParse(req.body);
-  if (!input.success || input.data.messages[input.data.messages.length - 1]?.role !== 'user') {
-    return res.status(400).json({ message: 'Send a message to start the conversation.' });
-  }
-  const key = process.env.AI_API_KEY;
-  if (!key) return res.status(503).json({ message: 'The AI assistant is not configured yet. Add AI_API_KEY to apps/server/.env, then restart the server.' });
-  const endpoint = process.env.AI_API_URL ?? 'https://api.openai.com/v1/chat/completions';
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: process.env.AI_MODEL ?? 'gpt-4o-mini',
-      temperature: 0.6,
-      max_tokens: 1200,
-      messages: [
-        { role: 'system', content: 'You are Interviewly AI, a helpful general-purpose assistant. Answer a broad range of questions clearly and respectfully. When useful, help with interview preparation, careers, learning, and the Interviewly app. Be honest when uncertain, do not claim to have browsed the web, and keep answers practical.' },
-        ...input.data.messages.slice(-12),
-      ],
-    }),
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!response.ok) return res.status(502).json({ message: 'The AI provider could not answer right now. Check the configured AI provider and try again.' });
-  const result = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-  const answer = result.choices?.[0]?.message?.content?.trim();
-  if (!answer) return res.status(502).json({ message: 'The AI provider returned an empty answer. Please try again.' });
-  res.json({ answer });
 }));
 
 app.post('/api/interviews', authenticate, asyncRoute(async (req, res) => {
